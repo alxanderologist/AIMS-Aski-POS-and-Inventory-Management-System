@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AMPC POS & Inventory — End-User UAT Findings</title>
+<style>
+  @page { size: A4; margin: 18mm 14mm; }
+  * { box-sizing: border-box; }
+  html, body { font-family: 'Segoe UI', system-ui, -apple-system, Helvetica, Arial, sans-serif; color: #0f172a; font-size: 11.5px; line-height: 1.5; margin: 0; }
+  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 15px; margin: 22px 0 6px; color: #1e293b; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; }
+  h3 { font-size: 12.5px; margin: 14px 0 6px; color: #0f172a; }
+  p { margin: 4px 0; }
+  .subtitle { color: #475569; margin-bottom: 8px; }
+  .meta { color: #64748b; font-size: 10.5px; margin-bottom: 18px; }
+  .meta b { color: #0f172a; }
+  .cover { border-left: 4px solid #4f46e5; background: #eef2ff; padding: 12px 14px; border-radius: 6px; margin-bottom: 14px; }
+  .cover p { margin: 3px 0; }
+  .sev {
+    display: inline-block; font-weight: 700; font-size: 9px;
+    padding: 2px 6px; border-radius: 999px; letter-spacing: 0.05em; text-transform: uppercase;
+    vertical-align: middle;
+  }
+  .sev-critical { background: #fecaca; color: #991b1b; }
+  .sev-high     { background: #fed7aa; color: #9a3412; }
+  .sev-medium   { background: #fde68a; color: #854d0e; }
+  .sev-low      { background: #d1fae5; color: #065f46; }
+  .finding { break-inside: avoid; margin: 8px 0 12px; padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 6px; background: #ffffff; }
+  .finding-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .finding-header .id { font-family: 'Consolas', 'Menlo', monospace; font-size: 10px; color: #475569; background: #f1f5f9; padding: 1px 6px; border-radius: 4px; }
+  .finding-header .title { font-weight: 700; font-size: 12px; color: #0f172a; }
+  .finding-body { color: #334155; }
+  .finding-body b { color: #0f172a; }
+  .evidence-block { display: flex; gap: 10px; margin-top: 6px; }
+  .evidence-block img { max-width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; }
+  .caption { font-size: 9.5px; color: #64748b; margin-top: 3px; font-style: italic; }
+  .table-summary { width: 100%; border-collapse: collapse; font-size: 10.5px; margin: 4px 0 12px; }
+  .table-summary th, .table-summary td { border: 1px solid #e2e8f0; padding: 5px 7px; text-align: left; vertical-align: top; }
+  .table-summary th { background: #f8fafc; }
+  .fix { border-left: 3px solid #10b981; padding-left: 8px; margin-top: 6px; color: #065f46; font-size: 10.5px; }
+  .fix b { color: #064e3b; }
+  .footer { margin-top: 18px; text-align: center; font-size: 9.5px; color: #94a3b8; }
+  ul { margin: 4px 0 6px 18px; padding: 0; }
+  li { margin: 2px 0; }
+  .screen-shot { display: block; margin: 8px 0; width: 100%; max-width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; }
+  section.category { break-before: auto; }
+  h2 + p { margin-top: 0; color: #475569; }
+</style>
+</head>
+<body>
+
+<h1>AMPC POS &amp; Inventory Management System</h1>
+<div class="subtitle"><b>End-User UAT Findings — UI/UX Test Session</b></div>
+<div class="meta">
+  Tester (as end-user): <b>Cashier &amp; Admin walk-through</b> &nbsp;·&nbsp;
+  Environment: <b>localhost:5173 (dev)</b> &nbsp;·&nbsp;
+  Build: <b>main @ latest</b> &nbsp;·&nbsp;
+  Date: <b>2026-09-21</b>
+</div>
+
+<div class="cover">
+  <p><b>Scope.</b> This session emulates the everyday operator — a cooperative cashier and a store admin — clicking through the login, dashboard, POS, inventory, forecasting, finance, and user-management screens as they exist in the running system. Findings are reported from a <b>usability</b> lens (clarity, safety of the click, discoverability), not a QA lens (unit-test coverage or code hygiene).</p>
+  <p><b>Method.</b> Puppeteer + system Chrome drove 14 captures across both desktop (1440×900) and mobile (390×844) viewports. Screenshots are attached inline as evidence. See <code>docs/uat/screens/</code> for source PNGs.</p>
+  <p><b>Result.</b> <b>40 issues</b> found — <b>3 Critical</b>, <b>14 High</b>, <b>16 Medium</b>, <b>7 Low</b>. Nothing here blocks a demo, but several items would be caught quickly if the cooperative's real staff started using the app. Fixes are suggested per row.</p>
+</div>
+
+<h2>Summary</h2>
+<table class="table-summary">
+  <tr><th style="width:8%">Severity</th><th style="width:8%">Count</th><th>Themes</th></tr>
+  <tr><td><span class="sev sev-critical">Critical</span></td><td>3</td><td>Credential leak on login, redirect-without-message on protected route, currency inconsistency across screens.</td></tr>
+  <tr><td><span class="sev sev-high">High</span></td><td>14</td><td>Ambiguous KPI labels, missing empty-state guidance, non-obvious click targets in POS, accidental-logout risk, no product images, alarming "Email alert" buttons, discount-modal password without show/hide.</td></tr>
+  <tr><td><span class="sev sev-medium">Medium</span></td><td>16</td><td>Inline vs modal Add Product, always-editable Min Stock cell, small-text diagnostics, missing tooltips, mixed button styles, sidebar branding, forecast-legend distinguishability.</td></tr>
+  <tr><td><span class="sev sev-low">Low</span></td><td>7</td><td>Labels, tooltips, avatar menu, empty-state illustrations, keyboard shortcuts, cursor-pointer misuse.</td></tr>
+</table>
+
+<!-- ============================ LOGIN ============================ -->
+<section class="category">
+<h2>Screen 1 — Login</h2>
+<p>Two captures: default landing state and the response to bad credentials.</p>
+
+<img class="screen-shot" src="screens/01-login.png" alt="Login screen" />
+<div class="caption">Figure 1a — Login page as an end user first sees it.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-01</span>
+    <span class="sev sev-critical">Critical</span>
+    <span class="title">Login page exposes dev credentials and a source-file path publicly</span>
+  </div>
+  <div class="finding-body">
+    Under the "Log in" button the page prints "<i>Dev mode — try admin / admin123, cashier / cashier123. See src/auth/devUsers.js.</i>" This is visible to any visitor of the deployed URL, so it (a) leaks working credentials for two roles, (b) advertises "dev mode" to an outsider, and (c) reveals an internal filename. A real end user has no reason to see any of this.
+  </div>
+  <div class="fix"><b>Fix:</b> gate the hint behind <code>import.meta.env.DEV</code> so it only renders on <code>npm run dev</code>, not on <code>npm run build</code>/preview. If it must appear in staging, put it behind a keyboard shortcut instead of on-screen text.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-02</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Password field has no show/hide toggle</span>
+  </div>
+  <div class="finding-body">
+    Cashiers on shift with adjacent screens can't verify what they typed. Every other password field in the app (Admin Verification, Supervisor Discount) already has an eye icon — login is inconsistent.
+  </div>
+  <div class="fix"><b>Fix:</b> reuse the existing <code>&lt;PasswordInput /&gt;</code> pattern from the AdminAuthModal.</div>
+</div>
+
+<img class="screen-shot" src="screens/01b-login-error.png" alt="Login error state" />
+<div class="caption">Figure 1b — Error message after typing wrong credentials.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-03</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Error message is generic and offers no next action</span>
+  </div>
+  <div class="finding-body">
+    "Invalid username or password." tells the user nothing about which field failed, whether they're locked out, or how to recover a forgotten password. There is no "Forgot password?" link anywhere.
+  </div>
+  <div class="fix"><b>Fix:</b> add a "Forgot password?" link that opens a contact-your-admin flow, and after 5 failed attempts show a "Locked — contact admin" state with an obvious next step.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-04</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">The "AMPC Inventory" brand name is inaccurate for the app's scope</span>
+  </div>
+  <div class="finding-body">
+    The system is a POS <b>and</b> an inventory manager. Calling it "AMPC Inventory" on the login card undersells it to a cashier who thinks they've opened the wrong app.
+  </div>
+  <div class="fix"><b>Fix:</b> rename to "AMPC POS &amp; Inventory" (matches the repo/README).</div>
+</div>
+</section>
+
+<!-- ============================ DASHBOARD ============================ -->
+<section class="category">
+<h2>Screen 2 — Admin Dashboard</h2>
+
+<img class="screen-shot" src="screens/02-dashboard.png" alt="Admin dashboard" />
+<div class="caption">Figure 2 — Landing dashboard immediately after admin login.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-05</span>
+    <span class="sev sev-critical">Critical</span>
+    <span class="title">Currency label swings between "PHP" and "₱" on the same screen</span>
+  </div>
+  <div class="finding-body">
+    <b>Total Revenue Today</b> reads <code>PHP 6,832.10</code>, but the <b>AI Demand Forecast</b> tile just below it reads <code>₱140,759</code>, and the Recent Transactions rows switch between <code>PHP 150.00</code> and — on other screens — <code>₱150.00</code>. It looks like two systems glued together.
+  </div>
+  <div class="fix"><b>Fix:</b> single <code>formatPeso(n)</code> helper using <code>₱</code>, applied everywhere. Add an ESLint rule to catch bare "PHP " prefixes.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-06</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">"Total Revenue Today" doesn't state the date</span>
+  </div>
+  <div class="finding-body">
+    In a seeded demo where dates span months, the admin can't tell what "today" means. This will be a support ticket the moment the system goes to a real coop that closes at 6 pm and the number never matches the register tape.
+  </div>
+  <div class="fix"><b>Fix:</b> subtitle the card with "<code>as of 21 Sep 2026, 03:35 PM</code>" and refresh it on the same cadence as the socket.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-07</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">AI Demand Forecast tile heading wraps awkwardly</span>
+  </div>
+  <div class="finding-body">
+    "AI Demand" appears on one line and "Forecast" on the next, because the green "● LIVE" pill crowds the title bar. It reads as two disconnected labels.
+  </div>
+  <div class="fix"><b>Fix:</b> shorten to "AI Forecast" or move the LIVE pill under the header.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-08</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">"1685 Items" low-stock number is presented as an alarm without triage</span>
+  </div>
+  <div class="finding-body">
+    That count is ~70% of the 2,429-item catalog. Presenting it in red with a bright "Email alert now" call-to-action guarantees alert fatigue and eventually a cashier hitting the button just to make it stop.
+  </div>
+  <div class="fix"><b>Fix:</b> split into "Critical (0 stock)" vs "Below reorder point" and hide the email button behind a menu.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-09</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">"GROWTH +32.5%" carries no timeframe</span>
+  </div>
+  <div class="finding-body">
+    The tile shows a green pill "+32.5%" with no comparison window. Is that vs. yesterday? last month? forecast delta? The number under it (₱140,759 projected) is 30-day, so most users will read it as "we grew 32.5% this month" and be wrong.
+  </div>
+  <div class="fix"><b>Fix:</b> label as "vs prior 30 days" or drop it.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-10</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Expiry Watchlist shows only "Expired" pills with no age</span>
+  </div>
+  <div class="finding-body">
+    Every visible row (Whole Milk 1L, Sliced Bread, Cheddar Cheese) is tagged "Expired" but the user can't tell whether that means "expired yesterday" or "expired six months ago". The column reads "STATUS / DAYS" but the DAYS half is empty.
+  </div>
+  <div class="fix"><b>Fix:</b> render "Expired 3d ago" / "Expires in 5d" using the anchor date the forecast already computes.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-11</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Sidebar label "Home" is ambiguous</span>
+  </div>
+  <div class="finding-body">
+    In a POS/inventory app this reads as "back to landing page" rather than "the dashboard". Every peer product (Odoo, Loyverse, Square) calls it "Dashboard".
+  </div>
+  <div class="fix"><b>Fix:</b> rename the sidebar item.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-12</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Notification bell has no unread badge</span>
+  </div>
+  <div class="finding-body">
+    The bell in the top-right is a bare icon. Users can't tell there are unread alerts without clicking, which they won't.
+  </div>
+  <div class="fix"><b>Fix:</b> add a red dot / numeric badge driven by the same feed that fills the bell popover.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-13</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Daily Sales Trend dots aren't connected — hard to read as a trend</span>
+  </div>
+  <div class="finding-body">
+    The chart title says "Trend" but only scatter dots are drawn. A trend line or connected polyline would communicate direction.
+  </div>
+  <div class="fix"><b>Fix:</b> switch Recharts <code>&lt;Scatter&gt;</code> to <code>&lt;Line&gt;</code>, add a 7-day rolling average behind it.</div>
+</div>
+
+</section>
+
+<!-- ============================ INVENTORY ============================ -->
+<section class="category">
+<h2>Screen 3 — Inventory Management</h2>
+
+<img class="screen-shot" src="screens/03-inventory.png" alt="Inventory list" />
+<div class="caption">Figure 3a — Inventory list, 2,429 items after AMPC import.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-14</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Min Stock is an always-editable input on every visible row</span>
+  </div>
+  <div class="finding-body">
+    Every product row renders a <code>&lt;input value="10"&gt;</code> under "MIN STOCK". Any accidental keystroke overwrites the reorder threshold without a save button. There's no confirm, no undo.
+  </div>
+  <div class="fix"><b>Fix:</b> render as a static number, tap-to-edit a pencil icon; require Enter to commit and Esc to cancel.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-15</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Stock column shows numbers styled as clickable links but they do nothing</span>
+  </div>
+  <div class="finding-body">
+    "40", "24", "27", "82" are blue and bold like anchor tags. Clicking them does nothing. False affordance.
+  </div>
+  <div class="fix"><b>Fix:</b> either wire them to open a stock-movement history drawer, or make them plain text.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-16</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">No visible pagination — 2,429 rows render into an endless scroll</span>
+  </div>
+  <div class="finding-body">
+    On the test machine this dropped the frame rate noticeably while scrolling. Cheap store hardware will struggle.
+  </div>
+  <div class="fix"><b>Fix:</b> paginate at 50 rows or add react-window virtualization.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-17</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">"Export Inventory Sheet" doesn't say what will be exported or in what format</span>
+  </div>
+  <div class="finding-body">
+    Excel? CSV? Filtered? All products? A first-time click is a guess.
+  </div>
+  <div class="fix"><b>Fix:</b> label as "Export .xlsx" and, when a search or category filter is active, subtitle "Export filtered (N items)".</div>
+</div>
+
+<img class="screen-shot" src="screens/03b-add-product-modal.png" alt="Add Product inline form" />
+<div class="caption">Figure 3b — Add Product opens as an inline panel, pushing the list down.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-18</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Add Product opens as an inline panel that pushes content out of view</span>
+  </div>
+  <div class="finding-body">
+    If the admin scrolls the list to double-check a similar SKU, the form scrolls too and loses focus. It also visually competes with the list header.
+  </div>
+  <div class="fix"><b>Fix:</b> turn it into a right-side slide-in drawer (matches the Purchase Order modal pattern already in the codebase).</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-19</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Category dropdown offers no way to add a new category on the fly</span>
+  </div>
+  <div class="finding-body">
+    After the AMPC import there are 30+ categories in use. If the admin needs a 31st, they can't create it here — they have to leave the form.
+  </div>
+  <div class="fix"><b>Fix:</b> combobox that accepts free text and offers "Create '<i>new value</i>'" at the bottom of the suggestion list.</div>
+</div>
+
+</section>
+
+<!-- ============================ FORECASTING ============================ -->
+<section class="category">
+<h2>Screen 4 — Demand &amp; Sales Forecasting</h2>
+
+<img class="screen-shot" src="screens/04-forecasting.png" alt="Forecasting 30 day" />
+<div class="caption">Figure 4a — 30-day outlook.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-20</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Backtest MAPE 250% is presented as a KPI, not a health warning</span>
+  </div>
+  <div class="finding-body">
+    A MAPE of 250% means the point forecast is off by 2.5× on average. To a coop administrator, "Backtest MAPE: 250%" reads like "look how much data we have" — not "the model is unreliable this month".
+  </div>
+  <div class="fix"><b>Fix:</b> colour-code the MAPE (green &lt; 20%, amber &lt; 50%, red otherwise) and add a "?" tooltip: "average absolute error of the last 7-day backtest".</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-21</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Chart legend entries are visually indistinguishable</span>
+  </div>
+  <div class="finding-body">
+    All four legend entries (80% Confidence, 95% Confidence, AI Forecast, Actual Sales) use identical dashed round markers. Colour alone is doing the work and the bands are close in hue.
+  </div>
+  <div class="fix"><b>Fix:</b> use solid swatches for the bands and dashed line for the forecast; darken the actual-sales fill.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-22</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Diagnostics footer is 11px gray — nearly unreadable</span>
+  </div>
+  <div class="finding-body">
+    The strip "Anchor / Last actual / History / Backtest MAPE / Trend / Level / Model / Service level / Lead time" packs eight critical facts in tiny type on a light background. A supervisor giving a demo can't point at it.
+  </div>
+  <div class="fix"><b>Fix:</b> bump to 12.5px, darker slate; break into two rows if it wraps.</div>
+</div>
+
+<img class="screen-shot" src="screens/04b-forecasting-60day.png" alt="60 day forecast" />
+<div class="caption">Figure 4b — 60-day forecast: prediction bands fan out visibly, useful.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-23</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Toggling 30- ↔ 60-day updates numbers but has no loading indicator</span>
+  </div>
+  <div class="finding-body">
+    The KPI tiles change silently after ~600ms. On slower hardware or a bad Wi-Fi, the user won't know something is loading.
+  </div>
+  <div class="fix"><b>Fix:</b> skeleton state on the KPI cards during the fetch.</div>
+</div>
+
+</section>
+
+<!-- ============================ FINANCE ============================ -->
+<section class="category">
+<h2>Screen 5 — Finance &amp; Audit Control</h2>
+
+<img class="screen-shot" src="screens/05-finance.png" alt="Finance page" />
+<div class="caption">Figure 5 — Finance overview after AMPC import (₱5.5M+ gross).</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-24</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">"NET REVENUE 99.9%" green pill is misleading</span>
+  </div>
+  <div class="finding-body">
+    A 99.9% figure next to Net Revenue reads as "profit margin". It's actually "net / gross" — a truism if discounts are near zero. Admins will confuse this with margin.
+  </div>
+  <div class="fix"><b>Fix:</b> label as "Retained after discounts" or drop the pill.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-25</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Register Variance Audit rows all say "cashier" — no shift/date to distinguish</span>
+  </div>
+  <div class="finding-body">
+    Four rows show "cashier ₱-75", "cashier ₱-95", "cashier ₱-51.2", "cashier ₱-40". Which shift? Which date? Without that, an admin can't investigate the shortage.
+  </div>
+  <div class="fix"><b>Fix:</b> show <code>shift #61 · cashier · Sep 21 AM</code> per row.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-26</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Two top-right icons (refresh, bell) with no tooltips</span>
+  </div>
+  <div class="finding-body">
+    Both are plain icons with no labels. First-time users have to click to guess.
+  </div>
+  <div class="fix"><b>Fix:</b> <code>title=""</code> tooltip on hover, or use a Lucide + text pattern like elsewhere.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-27</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Weekday Gross vs Net chart has no y-axis density; bars for Sat/Sun collapse</span>
+  </div>
+  <div class="finding-body">
+    Weekend bars are tiny relative to Tue/Thu. A log-scale toggle or a "% of weekday max" secondary line would help spot slow days.
+  </div>
+  <div class="fix"><b>Fix:</b> add a "% of best day" caption per bar.</div>
+</div>
+
+</section>
+
+<!-- ============================ USER MANAGEMENT ============================ -->
+<section class="category">
+<h2>Screen 6 — User Management (protected)</h2>
+
+<img class="screen-shot" src="screens/06-users.png" alt="User Management redirected" />
+<div class="caption">Figure 6 — Navigating directly to <code>/pages/ims/UserManagement</code> silently drops the user back on the Dashboard.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-28</span>
+    <span class="sev sev-critical">Critical</span>
+    <span class="title">Direct URL to protected route silently redirects with no explanation</span>
+  </div>
+  <div class="finding-body">
+    Deep-linking to <code>/pages/ims/UserManagement</code> lands on the Dashboard. The user (or a bookmark, or a support link) has no idea their request was rejected. If the sidebar guard is the canonical entry, the route itself should either open the admin-auth modal automatically or render an inline "Verify to continue" state.
+  </div>
+  <div class="fix"><b>Fix:</b> move the <code>isAdminAuthenticated</code> guard inside the route component so the modal fires on direct navigation too.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-29</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Double auth: role check + password re-verify</span>
+  </div>
+  <div class="finding-body">
+    The sidebar only shows "User Management" to ADMIN, then still demands the admin password before opening. Either the role check is enough, or the password should replace it — asking for both is friction without extra safety in a single-session context.
+  </div>
+  <div class="fix"><b>Fix:</b> keep the modal only for destructive actions (delete/deactivate), not for the read-only landing.</div>
+</div>
+
+</section>
+
+<!-- ============================ POS ============================ -->
+<section class="category">
+<h2>Screen 7 — Cashier POS</h2>
+
+<img class="screen-shot" src="screens/07-pos-empty.png" alt="POS empty state" />
+<div class="caption">Figure 7a — POS opened as cashier, empty cart.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-30</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Every product tile shares one placeholder icon</span>
+  </div>
+  <div class="finding-body">
+    2,429 SKUs, one graphic. Cashiers use visual grouping to spot the right SKU; identical placeholders force them to read every title. Real-world POS operators lose seconds per line item.
+  </div>
+  <div class="fix"><b>Fix:</b> even a category-icon fallback (bottle, snack, printer, etc.) would help; a real image URL on the Product schema is the long-term answer.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-31</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Product name truncation with no tooltip</span>
+  </div>
+  <div class="finding-body">
+    "PRINTING ADRITE RIBBON INK …" and "Multi-Surface Disinfectant Spr…" cut off silently. Hovering does nothing. Cashiers can't verify SKU before adding.
+  </div>
+  <div class="fix"><b>Fix:</b> native <code>title</code> on the truncated span, or a hover popover.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-32</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Logout is a single click away from a live shift</span>
+  </div>
+  <div class="finding-body">
+    The top bar shows Pending Sales · X-Reading/EOD · <b>Logout</b> · avatar. One misclick during a busy queue ends the shift and voids the cart on the next re-login. In real coop cashier flow this is a repeated fear.
+  </div>
+  <div class="fix"><b>Fix:</b> move Logout behind the avatar menu with a "You have items in the cart. Log out anyway?" confirmation.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-33</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">"Confirm" button greyed with no reason label</span>
+  </div>
+  <div class="finding-body">
+    First-time cashiers click it, nothing happens, they click harder. No tooltip, no "Add products to enable".
+  </div>
+  <div class="fix"><b>Fix:</b> replace the disabled state with a live label ("Cart is empty" / "Select payment method").</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-34</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Category dropdown label lies about state</span>
+  </div>
+  <div class="finding-body">
+    "All Products" toggle is active but the adjacent dropdown still says "Select Category". Users read them as separate contradictory filters.
+  </div>
+  <div class="fix"><b>Fix:</b> when "All Products" is active, dim the dropdown and set its label to "Any".</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-35</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">Amount Due shows a 0% pill next to ₱0.00 — meaningless in empty state</span>
+  </div>
+  <div class="finding-body">
+    The right-side panel shows "Amount Due ₱0.00 0%" with a subtotal ₱0.00 underneath. The 0% is meant to reflect discount; on an empty cart it's noise.
+  </div>
+  <div class="fix"><b>Fix:</b> hide the 0% pill until the cart has ≥ 1 item.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-36</span>
+    <span class="sev sev-low">Low</span>
+    <span class="title">"Cart is empty" state has no next-step guidance</span>
+  </div>
+  <div class="finding-body">
+    Just the sentence, centred. No icon, no "Scan a barcode or tap a product to start."
+  </div>
+  <div class="fix"><b>Fix:</b> illustrated empty state with two hints — scanner icon + product-tile icon.</div>
+</div>
+
+<img class="screen-shot" src="screens/07c-pos-discount-modal.png" alt="Supervisor discount modal" />
+<div class="caption">Figure 7b — Supervisor Discount modal.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-37</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Supervisor Discount modal opens with an empty cart</span>
+  </div>
+  <div class="finding-body">
+    Clicking "Apply Supervisor Discount" with no items in the cart still opens the modal. Typing anything ends up producing a "cannot apply" error only after Authorize &amp; Apply.
+  </div>
+  <div class="fix"><b>Fix:</b> disable the trigger button until <code>cart.length &gt; 0</code>.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-38</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">Supervisor Password field has no show/hide toggle</span>
+  </div>
+  <div class="finding-body">
+    Same fix as UAT-02 — but especially painful here because the supervisor is standing behind the cashier at rush hour.
+  </div>
+  <div class="fix"><b>Fix:</b> add the eye toggle used in the Admin modal.</div>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-39</span>
+    <span class="sev sev-medium">Medium</span>
+    <span class="title">"Percentage (%)" and "Value (₱)" both default to 0 — no visual "either or"</span>
+  </div>
+  <div class="finding-body">
+    The subtitle "editing either field recalculates the other" is buried in small type. Cashiers will type both by reflex and be confused when one overwrites the other.
+  </div>
+  <div class="fix"><b>Fix:</b> radio-style toggle "Percent | Peso" that hides the inactive field.</div>
+</div>
+
+</section>
+
+<!-- ============================ MOBILE ============================ -->
+<section class="category">
+<h2>Screen 8 — Mobile (390 × 844)</h2>
+
+<img class="screen-shot" src="screens/08-pos-mobile.png" alt="POS modal on mobile" />
+<div class="caption">Figure 8a — Discount modal on a phone — the modal itself is fine but the background POS UI is unusable at this width.</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="id">UAT-40</span>
+    <span class="sev sev-high">High</span>
+    <span class="title">No responsive layout — sidebar never collapses on mobile</span>
+  </div>
+  <div class="finding-body">
+    At 390px the sidebar shrinks but there is no hamburger toggle to reclaim horizontal space, POS cards squeeze into unreadable widths, and the dashboard KPIs vanish off-screen.
+  </div>
+  <div class="fix"><b>Fix:</b> hide the persistent sidebar under <code>md</code>; expose a top hamburger; make the POS product grid switch from 4-col to 2-col below 768px.</div>
+</div>
+
+<img class="screen-shot" src="screens/09-dashboard-mobile.png" alt="Mobile login" />
+<div class="caption">Figure 8b — Same session on mobile: because sessionStorage was cleared, the user is back on login. The login card itself scales cleanly.</div>
+
+</section>
+
+<!-- ============================ APPENDIX ============================ -->
+<section class="category">
+<h2>Prioritised backlog</h2>
+<table class="table-summary">
+<tr><th>ID</th><th>Sev</th><th>Where</th><th>What to change</th></tr>
+<tr><td>UAT-01</td><td>Critical</td><td>Login</td><td>Gate dev-mode credential hint behind <code>import.meta.env.DEV</code></td></tr>
+<tr><td>UAT-05</td><td>Critical</td><td>Global</td><td>Unify currency to <code>₱</code> via <code>formatPeso()</code></td></tr>
+<tr><td>UAT-28</td><td>Critical</td><td>User Mgmt route</td><td>Trigger admin-auth modal on the route itself, not only in sidebar</td></tr>
+<tr><td>UAT-02</td><td>High</td><td>Login</td><td>Password show/hide toggle</td></tr>
+<tr><td>UAT-06</td><td>High</td><td>Dashboard</td><td>Add date subtitle to "Total Revenue Today"</td></tr>
+<tr><td>UAT-07</td><td>High</td><td>Dashboard</td><td>Fix AI Forecast tile title wrap</td></tr>
+<tr><td>UAT-08</td><td>High</td><td>Dashboard</td><td>Split "Low Stocks Alert" into critical vs below-reorder</td></tr>
+<tr><td>UAT-09</td><td>High</td><td>Dashboard</td><td>Label growth timeframe</td></tr>
+<tr><td>UAT-10</td><td>High</td><td>Dashboard</td><td>Fill "DAYS" column on Expiry Watchlist</td></tr>
+<tr><td>UAT-14</td><td>High</td><td>Inventory</td><td>Tap-to-edit Min Stock, not always-editable</td></tr>
+<tr><td>UAT-15</td><td>High</td><td>Inventory</td><td>Either wire Stock number to a drawer, or de-style it</td></tr>
+<tr><td>UAT-20</td><td>High</td><td>Forecasting</td><td>Colour-code MAPE + tooltip</td></tr>
+<tr><td>UAT-24</td><td>High</td><td>Finance</td><td>Remove/relabel the "99.9%" NET Revenue pill</td></tr>
+<tr><td>UAT-25</td><td>High</td><td>Finance</td><td>Include shift/date per variance row</td></tr>
+<tr><td>UAT-30</td><td>High</td><td>POS</td><td>Category-icon fallback for product tiles</td></tr>
+<tr><td>UAT-31</td><td>High</td><td>POS</td><td>Tooltip on truncated product names</td></tr>
+<tr><td>UAT-32</td><td>High</td><td>POS</td><td>Move Logout behind avatar; confirm on cart-not-empty</td></tr>
+<tr><td>UAT-33</td><td>High</td><td>POS</td><td>Replace disabled Confirm with reason label</td></tr>
+<tr><td>UAT-37</td><td>High</td><td>POS</td><td>Disable discount trigger on empty cart</td></tr>
+<tr><td>UAT-38</td><td>High</td><td>POS</td><td>Show/hide toggle on supervisor password</td></tr>
+<tr><td>UAT-40</td><td>High</td><td>Mobile</td><td>Sidebar → hamburger under 768px; 2-col product grid</td></tr>
+</table>
+
+<h3>Notes for QA (not counted above)</h3>
+<ul>
+<li>Puppeteer script <code>backend/scripts/uatCapture.js</code> reproduces this walk-through in ~90s. Run it after every UI PR to spot regressions.</li>
+<li>Forecast Python microservice was unreachable during this walk-through (<code>pandas==3.0.6</code> pinned in <code>ai-service/requirements.txt</code> does not exist on PyPI) — the JS fallback is what all screenshots depict. Fixing the pin is a separate follow-up.</li>
+<li>The Aug/Sep transactions visible on charts come from <code>prisma/seeder.js</code>, not from the AMPC workbook — see conversation history.</li>
+</ul>
+
+<div class="footer">Generated 2026-09-21 from <code>backend/scripts/uatCapture.js</code>. Screenshot evidence in <code>docs/uat/screens/</code>.</div>
+
+</body>
+</html>

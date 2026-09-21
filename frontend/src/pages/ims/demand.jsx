@@ -12,12 +12,14 @@ import {
 } from 'lucide-react';
 import {
   ResponsiveContainer,
-  AreaChart,
+  ComposedChart,
   Area,
+  Line,
   XAxis,
   YAxis,
   Tooltip,
-  CartesianGrid
+  CartesianGrid,
+  Legend
 } from 'recharts';
 
 export default function Demand() {
@@ -78,7 +80,17 @@ export default function Demand() {
     );
   }
 
-  const { kpis, revenueTrajectory, skuDemandList } = forecast;
+  const { kpis, revenueTrajectory, skuDemandList, categoryBreakdown = [], diagnostics = null } = forecast;
+
+  // Recharts needs a positive width for the band Area — carry it as `bandRange`
+  // so we can render an [lower95, upper95] area behind the point forecast.
+  const trajectoryWithBand = revenueTrajectory.map((p) => ({
+    ...p,
+    band95: p.upper95 != null && p.lower95 != null ? [p.lower95, p.upper95] : null,
+    band80: p.upper80 != null && p.lower80 != null ? [p.lower80, p.upper80] : null,
+  }));
+
+  const pesos = (n) => `₱${Number(n || 0).toLocaleString()}`;
 
   return (
     <div className="space-y-6">
@@ -221,30 +233,85 @@ export default function Demand() {
         </div>
 
         <div className="p-6">
-          <div className="h-72 w-full">
+          <div className="h-80 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={revenueTrajectory} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
+              <ComposedChart data={trajectoryWithBand} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="colorActual" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.8}/>
-                    <stop offset="95%" stopColor="#4f46e5" stopOpacity={0}/>
-                  </linearGradient>
-                  <linearGradient id="colorForecast" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.8}/>
-                    <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                    <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.8} />
+                    <stop offset="95%" stopColor="#4f46e5" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                 <XAxis dataKey="day" tick={{ fontSize: 12, fill: '#64748b' }} />
-                <YAxis tick={{ fontSize: 12, fill: '#64748b' }} tickFormatter={(val) => `₱${val}`} />
-                <Tooltip formatter={(value) => [`₱${value}`, 'Revenue']} />
+                <YAxis tick={{ fontSize: 12, fill: '#64748b' }} tickFormatter={(val) => `₱${Math.round(val).toLocaleString()}`} />
+                <Tooltip formatter={(value, name) => [value == null ? '—' : pesos(value), name]} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                {/* 95 % confidence band */}
+                <Area type="monotone" dataKey="band95" stroke="none" fill="#10b981" fillOpacity={0.08} name="95% Confidence" isAnimationActive={false} />
+                {/* 80 % confidence band (inner, slightly darker) */}
+                <Area type="monotone" dataKey="band80" stroke="none" fill="#10b981" fillOpacity={0.18} name="80% Confidence" isAnimationActive={false} />
+                {/* Actual sales area */}
                 <Area type="monotone" dataKey="actual" stroke="#4f46e5" fillOpacity={1} fill="url(#colorActual)" name="Actual Sales" />
-                <Area type="monotone" dataKey="forecast" stroke="#10b981" strokeDasharray="5 5" fillOpacity={1} fill="url(#colorForecast)" name="AI Forecast" />
-              </AreaChart>
+                {/* Point forecast line */}
+                <Line type="monotone" dataKey="forecast" stroke="#10b981" strokeWidth={2} strokeDasharray="5 5" dot={false} name="AI Forecast" />
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
+          {diagnostics && (
+            <div className="mt-4 flex flex-wrap gap-x-6 gap-y-1 text-[11px] font-medium text-slate-500">
+              <span>Anchor: <span className="text-slate-700 font-bold">{kpis.anchor}</span></span>
+              <span>Last actual: <span className="text-slate-700 font-bold">{kpis.lastActualDate}</span></span>
+              <span>History: <span className="text-slate-700 font-bold">{kpis.historyDays} days</span></span>
+              <span>Backtest MAPE: <span className="text-slate-700 font-bold">{kpis.backtestMape != null ? kpis.backtestMape + '%' : 'n/a'}</span></span>
+              <span>Trend: <span className="text-slate-700 font-bold">{diagnostics.trendSlopePerDay >= 0 ? '+' : ''}{pesos(diagnostics.trendSlopePerDay)}/day</span></span>
+              <span>Level: <span className="text-slate-700 font-bold">{pesos(diagnostics.currentLevel)}</span></span>
+              <span>Model: <span className="text-slate-700 font-bold">{kpis.source}</span></span>
+              <span>Service level: <span className="text-slate-700 font-bold">{kpis.serviceLevel}</span></span>
+              <span>Lead time: <span className="text-slate-700 font-bold">{kpis.leadTimeDays}d</span></span>
+            </div>
+          )}
         </div>
       </div>
+
+      {/* CATEGORY BREAKDOWN */}
+      {categoryBreakdown.length > 0 && (
+        <div className="relative overflow-hidden bg-white border border-slate-200/80 rounded-3xl shadow-sm">
+          <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-600 flex items-center justify-center shadow-sm shadow-emerald-500/30">
+              <PackageCheck className="w-4 h-4 text-white" />
+            </div>
+            <div>
+              <h2 className="text-xs font-black text-slate-800 uppercase tracking-wide">Projected Revenue by Category</h2>
+              <p className="text-[11px] text-slate-500">Share allocated by historical revenue, scaled to the horizon projection</p>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="text-slate-700 bg-slate-50/80 border-b-2 border-slate-200 uppercase text-[11px] tracking-wider font-extrabold">
+                  <th className="px-4 py-3">Category</th>
+                  <th className="px-4 py-3 text-right">Historical Revenue</th>
+                  <th className="px-4 py-3 text-right">Qty Sold</th>
+                  <th className="px-4 py-3 text-right">Share</th>
+                  <th className="px-4 py-3 text-right">Projected Revenue</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                {categoryBreakdown.slice(0, 20).map((c, idx) => (
+                  <tr key={c.category} className={idx % 2 === 1 ? 'bg-slate-50/40' : ''}>
+                    <td className="px-4 py-3 font-bold text-slate-900">{c.category}</td>
+                    <td className="px-4 py-3 text-right">{pesos(c.historicalRevenue)}</td>
+                    <td className="px-4 py-3 text-right">{Number(c.qty).toLocaleString()}</td>
+                    <td className="px-4 py-3 text-right">{c.share}%</td>
+                    <td className="px-4 py-3 text-right font-bold text-emerald-600">{pesos(c.projectedRevenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* SKU DEMAND & REORDER TABLE */}
       <div className="relative overflow-hidden bg-white border border-slate-200/80 rounded-3xl shadow-sm">
@@ -267,10 +334,13 @@ export default function Demand() {
               <tr className="text-slate-700 bg-slate-50/80 border-b-2 border-slate-200 uppercase text-[11px] tracking-wider font-extrabold">
                 <th className="px-4 py-3.5">SKU</th>
                 <th className="px-4 py-3.5">Product Name</th>
-                <th className="px-4 py-3.5 text-center">Current Stock</th>
+                <th className="px-4 py-3.5 text-center">Stock</th>
                 <th className="px-4 py-3.5 text-center">Daily Demand</th>
-                <th className="px-4 py-3.5 text-center">7-Day Target</th>
+                <th className="px-4 py-3.5 text-center">7-Day</th>
+                <th className="px-4 py-3.5 text-center">Safety Stock</th>
+                <th className="px-4 py-3.5 text-center">Reorder Pt.</th>
                 <th className="px-4 py-3.5 text-center">Suggested Reorder</th>
+                <th className="px-4 py-3.5 text-center">Method</th>
                 <th className="px-4 py-3.5 text-right">Status</th>
               </tr>
             </thead>
@@ -282,8 +352,15 @@ export default function Demand() {
                   <td className="px-4 py-3.5 text-center">{item.stock}</td>
                   <td className="px-4 py-3.5 text-center">{item.dailyDemand} / day</td>
                   <td className="px-4 py-3.5 text-center">{item.forecast7Day}</td>
+                  <td className="px-4 py-3.5 text-center text-slate-500">{item.safetyStock ?? '—'}</td>
+                  <td className="px-4 py-3.5 text-center text-slate-500">{item.reorderPoint ?? '—'}</td>
                   <td className="px-4 py-3.5 text-center font-bold text-blue-600">
                     {item.reorderQty > 0 ? `+${item.reorderQty}` : '0'}
+                  </td>
+                  <td className="px-4 py-3.5 text-center">
+                    <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${item.method === 'croston' ? 'bg-violet-500/10 text-violet-700' : 'bg-slate-500/10 text-slate-700'}`}>
+                      {item.method || 'moving-avg'}
+                    </span>
                   </td>
                   <td className="px-4 py-3.5 text-right">
                     <span
