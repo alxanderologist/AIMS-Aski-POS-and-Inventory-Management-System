@@ -4,6 +4,7 @@
 // look-back and look-ahead.
 
 const { getForecastData } = require('../models/DemandForecast');
+const logger = require('./logger');
 const mailer = require('./mailer');
 
 async function buildDigest(days = 30) {
@@ -31,7 +32,7 @@ async function sendDigestNow(days = 30) {
 
   const res = await mailer.sendForecastDigest(digest);
   if (res && res.messageId) {
-    console.log(`[forecast] sent digest — ${res.messageId}`);
+    logger.info(`[forecast] sent digest — ${res.messageId}`);
   }
   return { ok: true, ...res };
 }

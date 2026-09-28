@@ -97,6 +97,37 @@ disabled by policy) — download it from Epson's TM-T82X support page alongside 
 its setup utility to assign a virtual IP, then set `RECEIPT_PRINTER_INTERFACE=tcp://<that
 IP>:9100` instead of the `printer:` form. Not needed for the primary path above.
 
+## Printing from a separate server PC over the LAN
+
+In the store deployment (see `deployment.md`), the backend runs on a separate store server PC while
+the TM-T82X stays plugged into the cashier PC — so the share from step 3 above needs to be reachable
+by hostname, not just `\\localhost\`. `winRawPrintDriver.js` already supports this: give
+`RECEIPT_PRINTER_INTERFACE` a UNC-style host in place of a bare share name.
+
+1. Do steps 1-4 above **on the cashier PC** (install the driver, share the printer, sanity-check
+   with `copy /b ... \\localhost\<share>` from that same machine).
+2. Find the cashier PC's name (Settings → System → About → Device name, or `hostname` in a Command
+   Prompt run there).
+3. From the **server PC**, sanity-check the remote share before touching the app:
+   ```
+   net view \\CASHIER-PC
+   echo AIMS TEST > %TEMP%\t.txt
+   copy /b %TEMP%\t.txt \\CASHIER-PC\EPSON_TMT82X
+   ```
+   Replace `CASHIER-PC` with the actual device name. "AIMS TEST" should print, same as the local
+   test in step 4. ("Access is denied" usually means the cashier PC's sharing permissions need the
+   server's Windows account added — Properties → Sharing → Advanced Sharing → Permissions; "The
+   network name cannot be found" means the hostname or share name is wrong.)
+4. In `backend/.env` **on the server**, set:
+   ```
+   RECEIPT_PRINTER_INTERFACE=printer:\\CASHIER-PC\EPSON_TMT82X
+   ```
+   (again, matching the real device name and share name exactly).
+5. Restart the backend on the server and repeat step 7 above (checkout, X-Reading, Z-Reading).
+
+If the cashier PC is off, this print path is unreachable and printing is skipped (checkout itself
+still succeeds — see "How this app prints" above); that tradeoff is accepted in `deployment.md`.
+
 ## When something doesn't look right
 
 Bring back whatever's on the paper (or the backend console's `[receipt-printer]` log line) and

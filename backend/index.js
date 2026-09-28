@@ -4,10 +4,45 @@ BigInt.prototype.toJSON = function () {
 
 require('dotenv').config();
 
+// --- Startup env validation: fail fast and loudly instead of starting in a silently-broken or
+// silently-insecure state (a missing JWT_SECRET used to only log a warning and 500 on first login;
+// a missing DATABASE_URL wasn't checked until the first query ran). ---
+(function assertValidEnv() {
+  const problems = [];
+  if (!process.env.DATABASE_URL) problems.push('DATABASE_URL is not set.');
+
+  const jwtSecret = process.env.JWT_SECRET || '';
+  if (!jwtSecret) {
+    problems.push('JWT_SECRET is not set.');
+  } else if (jwtSecret.length < 32 || jwtSecret === 'REPLACE_WITH_A_LONG_RANDOM_SECRET') {
+    problems.push('JWT_SECRET looks weak or is still the placeholder value — use a long random string (see backend/.env.example).');
+  }
+
+  if (process.env.NODE_ENV === 'production' && !process.env.AI_SERVICE_KEY) {
+    problems.push(
+      'AI_SERVICE_KEY is not set. Required when NODE_ENV=production so the AI forecasting service ' +
+        'cannot be called by anything but this backend (set the same value in ai-service/.env).',
+    );
+  }
+
+  if (problems.length > 0) {
+    console.error(
+      '\nFATAL: invalid backend configuration:\n' +
+        problems.map((p) => `  - ${p}`).join('\n') +
+        '\n\nFix backend/.env and restart. See backend/.env.example for guidance.\n',
+    );
+    process.exit(1);
+  }
+})();
+
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
 
 // Import Models
@@ -48,14 +83,58 @@ const expiryAlerts = require('./services/expiryAlerts');
 const forecastAlerts = require('./services/forecastAlerts');
 const forecastSnapshots = require('./services/forecastSnapshots');
 const receiptPrinter = require('./services/receiptPrinter');
+const backup = require('./services/backup');
 const { WIDTH: RECEIPT_WIDTH, renderToText, buildSaleReceipt, buildVoidReceipt } = require('./services/receiptLayout');
 const posApproval = require('./services/posApproval');
+const logger = require('./services/logger');
+
+// Without a process manager (Phase 4: pm2/NSSM), a single unhandled rejection or thrown error
+// outside any try/catch used to crash the process silently with no log line and no restart. Log it
+// clearly, then exit so the process manager's restart-on-crash takes over — staying up in a
+// possibly-corrupted state is worse than a clean restart.
+process.on('uncaughtException', (err) => {
+  logger.fatal({ err }, 'Uncaught exception — exiting');
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  logger.fatal({ err: reason }, 'Unhandled promise rejection — exiting');
+  process.exit(1);
+});
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Always allow the normal local dev origin; FRONTEND_URL (comma-separated) adds more without
+// replacing it — e.g. a VS Code port-forwarded/tunneled URL when testing from another device, or
+// the real frontend origin(s) in production. Shared by both the REST API's CORS and Socket.IO's —
+// a request from anywhere else is rejected by both.
+const allowedOrigins = ['http://localhost:5173', ...String(process.env.FRONTEND_URL || '').split(',').map((s) => s.trim()).filter(Boolean)];
+
+// General-purpose IP rate limit, loose enough that a busy shift never throttles a legitimate
+// cashier/admin (this is a small-store LAN deployment, not a public API) — layered on top of the
+// existing per-username login lockout (services/loginThrottle.js), not replacing it.
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Tighter limit specifically on login, since credential-guessing is the highest-value target for
+// an IP-based limit (the per-username lockout already covers repeated guesses at one account; this
+// covers an attacker spraying many different usernames from one IP).
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts from this network. Try again later.' },
+});
+
 // Middleware
-app.use(cors());
+app.use(helmet());
+app.use(cors({ origin: allowedOrigins }));
+app.use(generalLimiter);
 app.use(express.json());
 // Any successful write (a sale, a stock change, a purchase order, a supplier edit...) makes the cached
 // forecast out of date, so the next forecast request recomputes.
@@ -70,18 +149,25 @@ app.use((req, res, next) => {
 
 const server = http.createServer(app);
 
-// Always allow the normal local dev origin; FRONTEND_URL (comma-separated) adds more without
-// replacing it — e.g. a VS Code port-forwarded/tunneled URL when testing from another device.
-const socketOrigins = ['http://localhost:5173', ...String(process.env.FRONTEND_URL || '').split(',').map((s) => s.trim()).filter(Boolean)];
-
 const io = new Server(server, {
   cors: {
-    origin: socketOrigins,
+    origin: allowedOrigins,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
   },
 });
 
 app.set('io', io);
+
+// No auth required — for a process supervisor, uptime monitor, or load balancer to poll.
+app.get('/api/health', async (req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ status: 'ok', db: 'connected', uptimeSeconds: Math.round(process.uptime()) });
+  } catch (err) {
+    logger.error({ err }, '[health] database check failed');
+    res.status(503).json({ status: 'error', db: 'unreachable' });
+  }
+});
 
 // Only logged-in, active users may open a socket. Finance broadcasts go to a
 // role-scoped room so cashiers/inventory staff never receive them.
@@ -112,16 +198,16 @@ io.on('connection', (socket) => {
   const { role } = socket.data.user;
   if (role === 'ADMIN' || ROLES.FINANCE.includes(role)) socket.join(FINANCE_ROOM);
   if (role === 'ADMIN' || ROLES.DASHBOARD.includes(role)) socket.join(DASHBOARD_ROOM);
-  console.log('Client connected to WebSocket:', socket.id);
+  logger.info(`Client connected to WebSocket: ${socket.id}`);
   socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+    logger.info(`Client disconnected: ${socket.id}`);
   });
 });
 
 // --- ROUTES ---
 
 // --- AUTH ROUTES ---
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
     const result = await AuthModel.login(username, password);
@@ -137,7 +223,7 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
     await UserModel.changePassword(req.user.id, req.body.currentPassword, req.body.newPassword);
     res.json({ changed: true });
   } catch (error) {
-    if (!(error instanceof UserError)) console.error('Error changing password:', error);
+    if (!(error instanceof UserError)) logger.error({ err: error }, 'Error changing password');
     const known = error instanceof UserError;
     res.status(known ? error.status : 500).json({ error: known ? error.message : 'Failed to change password' });
   }
@@ -176,7 +262,7 @@ app.get('/api/users', authenticateToken, requireAdmin, async (req, res) => {
     const users = await UserModel.findAll();
     res.json(users);
   } catch (error) {
-    console.error('Error fetching users:', error);
+    logger.error({ err: error }, 'Error fetching users');
     res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
@@ -187,7 +273,7 @@ app.post('/api/users', authenticateToken, requireAdmin, async (req, res) => {
     const user = await UserModel.create({ fullName, username, password, role }, req.user);
     res.status(201).json(user);
   } catch (error) {
-    console.error('Error creating user:', error);
+    logger.error({ err: error }, 'Error creating user');
     res.status(400).json({ error: error.message || 'Failed to create user' });
   }
 });
@@ -197,7 +283,7 @@ app.patch('/api/users/:id/role', authenticateToken, requireAdmin, async (req, re
     const user = await UserModel.updateRole(req.params.id, req.body.role, req.user);
     res.json(user);
   } catch (error) {
-    console.error('Error updating user role:', error);
+    logger.error({ err: error }, 'Error updating user role');
     res.status(400).json({ error: error.message || 'Failed to update role' });
   }
 });
@@ -207,7 +293,7 @@ app.patch('/api/users/:id/status', authenticateToken, requireAdmin, async (req, 
     const user = await UserModel.setActive(req.params.id, req.body.isActive, req.user);
     res.json(user);
   } catch (error) {
-    console.error('Error updating user status:', error);
+    logger.error({ err: error }, 'Error updating user status');
     res.status(400).json({ error: error.message || 'Failed to update status' });
   }
 });
@@ -218,7 +304,7 @@ app.delete('/api/users/:id', authenticateToken, requireAdmin, async (req, res) =
     const user = await UserModel.softDelete(req.params.id, req.user);
     res.json(user);
   } catch (error) {
-    console.error('Error deleting user:', error);
+    logger.error({ err: error }, 'Error deleting user');
     res.status(400).json({ error: error.message || 'Failed to delete user' });
   }
 });
@@ -230,7 +316,7 @@ app.put('/api/users/:id/pin', authenticateToken, requireAdmin, async (req, res) 
     const user = await UserModel.setPin(req.params.id, pin, req.user);
     res.json(user);
   } catch (error) {
-    console.error('Error updating user PIN:', error);
+    logger.error({ err: error }, 'Error updating user PIN');
     res.status(400).json({ error: error.message || 'Failed to update PIN' });
   }
 });
@@ -240,7 +326,7 @@ app.post('/api/users/:id/reset-password', authenticateToken, requireAdmin, async
     const result = await UserModel.resetPassword(req.params.id, req.user);
     res.json(result);
   } catch (error) {
-    console.error('Error resetting password:', error);
+    logger.error({ err: error }, 'Error resetting password');
     res.status(400).json({ error: error.message || 'Failed to reset password' });
   }
 });
@@ -253,7 +339,7 @@ app.get('/api/audit-log', authenticateToken, requireAdmin, async (req, res) => {
     }
     res.json(await AuditLogModel.findAll(req.query));
   } catch (error) {
-    console.error('Error fetching audit log:', error);
+    logger.error({ err: error }, 'Error fetching audit log');
     res.status(500).json({ error: 'Failed to fetch audit log' });
   }
 });
@@ -265,7 +351,7 @@ app.get('/api/products', authenticateToken, requireRole(...ROLES.PRODUCT_LOOKUP)
     const products = await ProductModel.findAll({ page, limit, search, category });
     res.json(products);
   } catch (error) {
-    console.error('Error fetching products:', error);
+    logger.error({ err: error }, 'Error fetching products');
     res.status(500).json({ error: 'Failed to fetch products' });
   }
 });
@@ -273,7 +359,7 @@ app.get('/api/products', authenticateToken, requireRole(...ROLES.PRODUCT_LOOKUP)
 // Maps product/inventory failures onto HTTP: typed errors carry their own status, anything
 // unexpected is a generic 500.
 const sendProductError = (res, error, action) => {
-  console.error(`Error ${action}:`, error);
+  logger.error({ err: error }, `Error ${action}`);
   if (error instanceof ProductError) return res.status(error.status).json({ error: error.message });
   return res.status(500).json({ error: `Failed to ${action}` });
 };
@@ -347,7 +433,7 @@ app.get('/api/stock-movements', authenticateToken, requireRole(...ROLES.INVENTOR
     }
     res.json(await StockMovementModel.findAll(req.query));
   } catch (error) {
-    console.error('Error fetching stock movements:', error);
+    logger.error({ err: error }, 'Error fetching stock movements');
     res.status(500).json({ error: 'Failed to fetch stock movements' });
   }
 });
@@ -360,7 +446,7 @@ app.get('/api/stock-movements/export', authenticateToken, requireRole(...ROLES.I
     }
     res.json(await StockMovementModel.findAllForExport(req.query));
   } catch (error) {
-    console.error('Error exporting stock movements:', error);
+    logger.error({ err: error }, 'Error exporting stock movements');
     res.status(500).json({ error: 'Failed to export stock movements' });
   }
 });
@@ -375,7 +461,7 @@ app.get('/api/reconciliation-report', authenticateToken, requireRole(...ROLES.IN
     if (error instanceof ReconciliationReportModel.ReconciliationError) {
       return res.status(error.status).json({ error: error.message });
     }
-    console.error('Error building reconciliation report:', error);
+    logger.error({ err: error }, 'Error building reconciliation report');
     res.status(500).json({ error: 'Failed to build reconciliation report' });
   }
 });
@@ -387,7 +473,7 @@ app.get('/api/products/:id/movements', authenticateToken, requireRole(...ROLES.I
     if (!productId) return res.status(400).json({ error: 'Invalid product id' });
     res.json(await StockMovementModel.findAll({ ...req.query, productId }));
   } catch (error) {
-    console.error('Error fetching product movements:', error);
+    logger.error({ err: error }, 'Error fetching product movements');
     res.status(500).json({ error: 'Failed to fetch product movements' });
   }
 });
@@ -399,7 +485,7 @@ app.get('/api/products/:id/movements/export', authenticateToken, requireRole(...
     if (!productId) return res.status(400).json({ error: 'Invalid product id' });
     res.json(await StockMovementModel.findAllForExport({ ...req.query, productId }));
   } catch (error) {
-    console.error('Error exporting product movements:', error);
+    logger.error({ err: error }, 'Error exporting product movements');
     res.status(500).json({ error: 'Failed to export product movements' });
   }
 });
@@ -412,7 +498,7 @@ app.get('/api/products/:id/batches', authenticateToken, requireRole(...ROLES.INV
     if (!productId) return res.status(400).json({ error: 'Invalid product id' });
     res.json(await StockBatchModel.findByProduct(productId));
   } catch (error) {
-    console.error('Error fetching product batches:', error);
+    logger.error({ err: error }, 'Error fetching product batches');
     res.status(500).json({ error: 'Failed to fetch product batches' });
   }
 });
@@ -426,14 +512,14 @@ app.get('/api/products/barcode/:code', authenticateToken, requireRole(...ROLES.P
     }
     res.json(products);
   } catch (error) {
-    console.error('Error finding barcode:', error);
+    logger.error({ err: error }, 'Error finding barcode');
     res.status(500).json({ error: 'Barcode lookup failed' });
   }
 });
 
 // Maps supplier failures onto HTTP: typed errors carry their own status, anything unexpected is a 500.
 const sendSupplierError = (res, error, action) => {
-  console.error(`Error ${action}:`, error);
+  logger.error({ err: error }, `Error ${action}`);
   if (error instanceof SupplierModel.SupplierError) return res.status(error.status).json({ error: error.message });
   return res.status(500).json({ error: `Failed to ${action}` });
 };
@@ -474,7 +560,7 @@ app.patch('/api/suppliers/:id', authenticateToken, requireRole(...ROLES.INVENTOR
 // Maps purchasing failures onto HTTP: typed errors carry their own status, a vanished session is 401,
 // anything unexpected is a generic 500.
 const sendPurchasingError = (res, error, action) => {
-  console.error(`Error ${action}:`, error);
+  logger.error({ err: error }, `Error ${action}`);
   if (error.message === STALE_SESSION_ERROR) return res.status(401).json({ error: error.message });
   if (error instanceof PurchasingError) return res.status(error.status).json({ error: error.message });
   return res.status(500).json({ error: `Failed to ${action}` });
@@ -519,7 +605,7 @@ app.get('/api/purchase-orders/:id/export', authenticateToken, requireRole(...ROL
     await workbook.xlsx.write(res);
     res.end();
   } catch (error) {
-    console.error('Error exporting purchase order:', error);
+    logger.error({ err: error }, 'Error exporting purchase order');
     res.status(500).json({ error: 'Failed to export purchase order' });
   }
 });
@@ -530,7 +616,7 @@ app.get('/api/purchase-orders/pending', authenticateToken, requireRole(...ROLES.
     const pendingOrders = await PurchaseOrderModel.findPending();
     res.json(pendingOrders);
   } catch (error) {
-    console.error('Error fetching pending purchase orders:', error);
+    logger.error({ err: error }, 'Error fetching pending purchase orders');
     res.status(500).json({ error: 'Failed to fetch pending purchase orders' });
   }
 });
@@ -541,7 +627,7 @@ app.get('/api/purchase-orders', authenticateToken, requireRole(...ROLES.INVENTOR
     const purchaseOrders = await PurchaseOrderModel.findAll(req.query.search);
     res.json(purchaseOrders);
   } catch (error) {
-    console.error('Error fetching purchase orders:', error);
+    logger.error({ err: error }, 'Error fetching purchase orders');
     res.status(500).json({ error: 'Failed to fetch purchase orders' });
   }
 });
@@ -555,7 +641,7 @@ app.get('/api/purchase-orders/:id', authenticateToken, requireRole(...ROLES.INVE
     }
     res.json(purchaseOrder);
   } catch (error) {
-    console.error('Error fetching purchase order:', error);
+    logger.error({ err: error }, 'Error fetching purchase order');
     res.status(500).json({ error: 'Failed to fetch purchase order' });
   }
 });
@@ -646,7 +732,7 @@ app.get('/api/receiving-reports/:id/export', authenticateToken, requireRole(...R
     await workbook.xlsx.write(res);
     res.end();
   } catch (error) {
-    console.error('Error exporting receiving report:', error);
+    logger.error({ err: error }, 'Error exporting receiving report');
     res.status(500).json({ error: 'Failed to export receiving report' });
   }
 });
@@ -657,7 +743,7 @@ app.get('/api/receiving-reports', authenticateToken, requireRole(...ROLES.INVENT
     const receivingReports = await ReceivingReportModel.findAll({ supplierId: req.query.supplierId });
     res.json(receivingReports);
   } catch (error) {
-    console.error('Error fetching receiving reports:', error);
+    logger.error({ err: error }, 'Error fetching receiving reports');
     res.status(500).json({ error: 'Failed to fetch receiving reports' });
   }
 });
@@ -671,7 +757,7 @@ app.get('/api/receiving-reports/:id', authenticateToken, requireRole(...ROLES.IN
     }
     res.json(receivingReport);
   } catch (error) {
-    console.error('Error fetching receiving report:', error);
+    logger.error({ err: error }, 'Error fetching receiving report');
     res.status(500).json({ error: 'Failed to fetch receiving report' });
   }
 });
@@ -703,7 +789,7 @@ app.get('/api/purchase-returns', authenticateToken, requireRole(...ROLES.INVENTO
   try {
     res.json(await PurchaseReturnModel.findAll());
   } catch (error) {
-    console.error('Error fetching purchase returns:', error);
+    logger.error({ err: error }, 'Error fetching purchase returns');
     res.status(500).json({ error: 'Failed to fetch purchase returns' });
   }
 });
@@ -717,7 +803,7 @@ app.get('/api/purchase-returns/:id', authenticateToken, requireRole(...ROLES.INV
     }
     res.json(purchaseReturn);
   } catch (error) {
-    console.error('Error fetching purchase return:', error);
+    logger.error({ err: error }, 'Error fetching purchase return');
     res.status(500).json({ error: 'Failed to fetch purchase return' });
   }
 });
@@ -736,7 +822,7 @@ app.get('/api/purchase-returns/:id/export', authenticateToken, requireRole(...RO
     await workbook.xlsx.write(res);
     res.end();
   } catch (error) {
-    console.error('Error exporting purchase return:', error);
+    logger.error({ err: error }, 'Error exporting purchase return');
     res.status(500).json({ error: 'Failed to export purchase return' });
   }
 });
@@ -753,7 +839,7 @@ app.get('/api/members', authenticateToken, requireRole(...MEMBERS_READ), async (
     if (req.query.search) return res.json(await MemberModel.search(req.query.search));
     res.json(await MemberModel.findAll());
   } catch (error) {
-    console.error('Error fetching members:', error);
+    logger.error({ err: error }, 'Error fetching members');
     res.status(500).json({ error: 'Failed to fetch members' });
   }
 });
@@ -766,7 +852,7 @@ app.get('/api/members/:id/points-history', authenticateToken, requireRole(...MEM
     if (error instanceof MemberModel.MemberError) {
       return res.status(error.status).json({ error: error.message });
     }
-    console.error('Error fetching member points history:', error);
+    logger.error({ err: error }, 'Error fetching member points history');
     res.status(500).json({ error: 'Failed to fetch points history' });
   }
 });
@@ -779,7 +865,7 @@ app.get('/api/members/:cardNumber', authenticateToken, requireRole(...MEMBERS_RE
     if (error instanceof MemberModel.MemberError) {
       return res.status(error.status).json({ error: error.message });
     }
-    console.error('Error looking up member:', error);
+    logger.error({ err: error }, 'Error looking up member');
     res.status(500).json({ error: 'Failed to look up member' });
   }
 });
@@ -793,7 +879,7 @@ app.post('/api/members', authenticateToken, requireRole(...ROLES.POS), async (re
     if (error instanceof MemberModel.MemberError) {
       return res.status(error.status).json({ error: error.message });
     }
-    console.error('Error registering member:', error);
+    logger.error({ err: error }, 'Error registering member');
     res.status(500).json({ error: 'Failed to register member' });
   }
 });
@@ -811,7 +897,7 @@ app.post('/api/pos/approve', authenticateToken, requireRole(...ROLES.POS), async
     if (error instanceof posApproval.ApprovalError) {
       return res.status(error.status).json({ error: error.message, code: error.code });
     }
-    console.error('Approval error:', error);
+    logger.error({ err: error }, 'Approval error');
     res.status(500).json({ error: 'Failed to verify supervisor PIN' });
   }
 });
@@ -844,7 +930,7 @@ app.post('/api/transactions', authenticateToken, requireRole(...ROLES.POS), asyn
         referenceNumber: result.referenceNumber,
         amountPaid: req.body.amountPaid ?? result.totalAmount,
       })
-      .catch((err) => console.error('[receipt-printer] Unexpected print error:', err.message));
+      .catch((err) => logger.error({ err }, '[receipt-printer] Unexpected print error'));
 
     // Fire-and-forget low-stock crossing alert. Never blocks or fails the sale.
     const stockUpdates = result && result._stockUpdates;
@@ -858,7 +944,7 @@ app.post('/api/transactions', authenticateToken, requireRole(...ROLES.POS), asyn
     if (error instanceof TransactionModel.CheckoutError || error instanceof posApproval.ApprovalError) {
       return res.status(error.status).json({ error: error.message, code: error.code });
     }
-    console.error('Transaction error:', error);
+    logger.error({ err: error }, 'Transaction error');
     if (error.message === STALE_SESSION_ERROR) {
       return res.status(401).json({ error: error.message });
     }
@@ -873,7 +959,7 @@ app.post('/api/print/receipt', authenticateToken, requireRole(...ROLES.POS), asy
     const result = await receiptPrinter.printReceipt({ ...req.body, cashier: req.user.username });
     res.json(result);
   } catch (error) {
-    console.error('Manual receipt print failed:', error);
+    logger.error({ err: error }, 'Manual receipt print failed');
     res.status(500).json({ printed: false, reason: 'error', error: error.message });
   }
 });
@@ -888,7 +974,7 @@ app.get('/api/transactions/:id/receipt', authenticateToken, requireRole(...ROLES
     const lines = renderToText(buildSaleReceipt(sale, { reprintedAt: new Date() }));
     res.json({ id: sale.id, reference: sale.transactionNo, createdAt: sale.createdAt, width: RECEIPT_WIDTH, lines });
   } catch (error) {
-    console.error('Error building receipt preview:', error);
+    logger.error({ err: error }, 'Error building receipt preview');
     res.status(500).json({ error: 'Failed to load receipt' });
   }
 });
@@ -901,7 +987,7 @@ app.post('/api/transactions/:id/reprint', authenticateToken, requireRole(...ROLE
     if (!sale) return res.status(404).json({ error: 'Transaction not found' });
     res.json(await receiptPrinter.printReceipt(sale, { reprint: true }));
   } catch (error) {
-    console.error('Error reprinting receipt:', error);
+    logger.error({ err: error }, 'Error reprinting receipt');
     res.status(500).json({ printed: false, reason: 'error', error: error.message });
   }
 });
@@ -912,7 +998,7 @@ app.get('/api/transactions', authenticateToken, requireRole(...ROLES.FINANCE), a
     const transactions = await TransactionModel.findAll();
     res.json(transactions);
   } catch (error) {
-    console.error('Error fetching transactions:', error);
+    logger.error({ err: error }, 'Error fetching transactions');
     res.status(500).json({ error: 'Failed to fetch transactions' });
   }
 });
@@ -923,7 +1009,7 @@ app.get('/api/sales-report', authenticateToken, requireRole(...ROLES.FINANCE), a
   try {
     res.json(await TransactionModel.findForReport({ month: req.query.month }));
   } catch (error) {
-    console.error('Error building sales report:', error);
+    logger.error({ err: error }, 'Error building sales report');
     res.status(500).json({ error: 'Failed to build sales report' });
   }
 });
@@ -947,7 +1033,7 @@ app.get('/api/dashboard/summary', authenticateToken, requireRole(...ROLES.DASHBO
       recentTransactions,
     });
   } catch (error) {
-    console.error('Error fetching dashboard summary:', error);
+    logger.error({ err: error }, 'Error fetching dashboard summary');
     res.status(500).json({ error: 'Failed to fetch dashboard metrics' });
   }
 });
@@ -968,7 +1054,7 @@ app.get('/api/forecast', authenticateToken, requireRole(...ROLES.DASHBOARD), asy
       data: forecastData,
     });
   } catch (error) {
-    console.error('Error fetching AI forecast:', error);
+    logger.error({ err: error }, 'Error fetching AI forecast');
     res.status(500).json({
       success: false,
       message: 'Failed to generate AI demand forecast',
@@ -983,7 +1069,7 @@ app.get('/api/finance/summary', authenticateToken, requireRole(...ROLES.FINANCE)
     const data = await FinanceModel.getSummary();
     res.json(data);
   } catch (error) {
-    console.error('Error fetching finance summary:', error);
+    logger.error({ err: error }, 'Error fetching finance summary');
     res.status(500).json({ error: 'Failed to fetch financial audit summary' });
   }
 });
@@ -1008,7 +1094,7 @@ app.get('/api/reconciliation/expected-cash', authenticateToken, requireRole(...R
     return res.status(200).json(data);
   } catch (error) {
     if (sendApprovalOrReconError(res, error)) return;
-    console.error('Error calculating expected cash:', error);
+    logger.error({ err: error }, 'Error calculating expected cash');
     return res.status(500).json({
       error: 'Failed to calculate expected cash',
       expectedCash: 0,
@@ -1042,10 +1128,10 @@ app.post('/api/reconciliation', authenticateToken, requireRole(...ROLES.RECONCIL
     // never blocks or fails the request. Mirrors what "Export X-Reading" downloads as a sheet.
     receiptPrinter
       .printXReading(record)
-      .catch((err) => console.error('[receipt-printer] Unexpected X-Reading print error:', err.message));
+      .catch((err) => logger.error({ err }, '[receipt-printer] Unexpected X-Reading print error'));
   } catch (error) {
     if (sendApprovalOrReconError(res, error)) return;
-    console.error('Error creating reconciliation:', error);
+    logger.error({ err: error }, 'Error creating reconciliation');
     if (error.message === STALE_SESSION_ERROR) {
       return res.status(401).json({ error: error.message });
     }
@@ -1059,7 +1145,7 @@ app.get('/api/reconciliation', authenticateToken, requireRole(...ROLES.RECONCILI
     const recons = await ReconciliationModel.findAll();
     res.json(recons);
   } catch (error) {
-    console.error('Error fetching reconciliations:', error);
+    logger.error({ err: error }, 'Error fetching reconciliations');
     res.status(500).json({ error: 'Failed to fetch all reconciliations' });
   }
 });
@@ -1088,7 +1174,7 @@ app.post('/api/pos/z-reading', authenticateToken, requireRole(...ROLES.POS), asy
     if (error instanceof posApproval.ApprovalError || error instanceof ZReadingModel.ZReadingError) {
       return res.status(error.status).json({ error: error.message, code: error.code });
     }
-    console.error('Error creating Z-Reading:', error);
+    logger.error({ err: error }, 'Error creating Z-Reading');
     res.status(500).json({ error: 'Failed to create Z-Reading' });
   }
 });
@@ -1100,7 +1186,7 @@ app.get('/api/pos/z-reading', authenticateToken, requireRole(...ROLES.POS), asyn
     const cashierId = canViewOthers && req.query.cashierId ? req.query.cashierId : req.user.id;
     res.json(await ZReadingModel.findAll({ cashierId }));
   } catch (error) {
-    console.error('Error fetching Z-Readings:', error);
+    logger.error({ err: error }, 'Error fetching Z-Readings');
     res.status(500).json({ error: 'Failed to fetch Z-Readings' });
   }
 });
@@ -1116,7 +1202,7 @@ app.post('/api/pos/z-reading/:id/reprint', authenticateToken, requireRole(...ROL
     }
     res.json(await receiptPrinter.printZReading(report, { reprint: true }));
   } catch (error) {
-    console.error('Error reprinting Z-Reading:', error);
+    logger.error({ err: error }, 'Error reprinting Z-Reading');
     res.status(500).json({ printed: false, reason: 'error', error: error.message });
   }
 });
@@ -1140,7 +1226,7 @@ app.get('/api/pos/sales', authenticateToken, requireRole(...ROLES.POS), async (r
   try {
     res.json(await SaleVoidModel.listForPos({ userId: req.user.id, search: req.query.search }));
   } catch (error) {
-    console.error('Error listing sales for void:', error);
+    logger.error({ err: error }, 'Error listing sales for void');
     res.status(500).json({ error: 'Failed to load sales' });
   }
 });
@@ -1166,10 +1252,10 @@ app.post('/api/pos/voids', authenticateToken, requireRole(...ROLES.POS), async (
     const io = req.app.get('io');
     ProductModel.findManyFormatted(productIds)
       .then((products) => io.to(DASHBOARD_ROOM).emit('stock_updated', { products }))
-      .catch((err) => console.error('Error broadcasting stock after void:', err.message));
+      .catch((err) => logger.error({ err }, 'Error broadcasting stock after void'));
     FinanceModel.getSummary()
       .then((summary) => io.to(FINANCE_ROOM).emit('finance_updated', summary))
-      .catch((err) => console.error('Error broadcasting finance after void:', err.message));
+      .catch((err) => logger.error({ err }, 'Error broadcasting finance after void'));
 
     const receipt = await SaleVoidModel.findReceiptData(saleVoid.id);
     const print = await receiptPrinter
@@ -1178,7 +1264,7 @@ app.post('/api/pos/voids', authenticateToken, requireRole(...ROLES.POS), async (
     res.status(201).json({ ...saleVoid, print });
   } catch (error) {
     if (sendVoidError(res, error)) return;
-    console.error('Error voiding sale:', error);
+    logger.error({ err: error }, 'Error voiding sale');
     res.status(500).json({ error: 'Failed to void the sale' });
   }
 });
@@ -1191,7 +1277,7 @@ app.get('/api/voids/:id/receipt', authenticateToken, requireRole(...VOID_RECEIPT
     const lines = renderToText(buildVoidReceipt(data, { reprintedAt: new Date() }));
     res.json({ id: data.id, reference: data.voidNo, createdAt: data.voidedAt, width: RECEIPT_WIDTH, lines });
   } catch (error) {
-    console.error('Error building void receipt preview:', error);
+    logger.error({ err: error }, 'Error building void receipt preview');
     res.status(500).json({ error: 'Failed to load void receipt' });
   }
 });
@@ -1202,7 +1288,7 @@ app.post('/api/voids/:id/reprint', authenticateToken, requireRole(...VOID_RECEIP
     if (!data) return res.status(404).json({ error: 'Void not found' });
     res.json(await receiptPrinter.printVoidReceipt(data, { reprint: true }));
   } catch (error) {
-    console.error('Error reprinting void receipt:', error);
+    logger.error({ err: error }, 'Error reprinting void receipt');
     res.status(500).json({ printed: false, reason: 'error', error: error.message });
   }
 });
@@ -1214,7 +1300,7 @@ app.get('/api/alerts/low-stock', authenticateToken, requireRole(...ROLES.DASHBOA
     const products = await lowStockAlerts.findCurrentlyLow();
     res.json({ count: products.length, products });
   } catch (error) {
-    console.error('Low-stock query failed:', error);
+    logger.error({ err: error }, 'Low-stock query failed');
     res.status(500).json({ error: 'Failed to query low-stock products' });
   }
 });
@@ -1229,7 +1315,7 @@ app.post('/api/alerts/low-stock/send-now', authenticateToken, requireRole(...ROL
     const result = await lowStockAlerts.sendDigestNow();
     res.json({ ok: true, ...result });
   } catch (error) {
-    console.error('Manual low-stock digest failed:', error);
+    logger.error({ err: error }, 'Manual low-stock digest failed');
     res.status(500).json({ error: 'Failed to send low-stock digest email' });
   }
 });
@@ -1243,7 +1329,7 @@ app.get('/api/alerts/expiry', authenticateToken, requireRole(...ROLES.DASHBOARD)
       products,
     });
   } catch (error) {
-    console.error('Expiry query failed:', error);
+    logger.error({ err: error }, 'Expiry query failed');
     res.status(500).json({ error: 'Failed to query expiring products' });
   }
 });
@@ -1258,7 +1344,7 @@ app.post('/api/alerts/expiry/send-now', authenticateToken, requireRole(...ROLES.
     const result = await expiryAlerts.sendDigestNow();
     res.json({ ok: true, ...result });
   } catch (error) {
-    console.error('Manual expiry digest failed:', error);
+    logger.error({ err: error }, 'Manual expiry digest failed');
     res.status(500).json({ error: 'Failed to send expiry digest email' });
   }
 });
@@ -1268,7 +1354,7 @@ app.get('/api/forecast/accuracy', authenticateToken, requireRole(...ROLES.DASHBO
   try {
     res.json({ success: true, data: await ForecastAccuracyModel.getAccuracy() });
   } catch (error) {
-    console.error('Error computing forecast accuracy:', error);
+    logger.error({ err: error }, 'Error computing forecast accuracy');
     res.status(500).json({ success: false, message: 'Failed to compute forecast accuracy' });
   }
 });
@@ -1286,7 +1372,7 @@ app.post('/api/alerts/forecast/send-now', authenticateToken, requireRole(...ROLE
     const result = await forecastAlerts.sendDigestNow(days);
     res.json(result);
   } catch (error) {
-    console.error('Manual forecast digest failed:', error);
+    logger.error({ err: error }, 'Manual forecast digest failed');
     res.status(500).json({ error: 'Failed to send forecast digest email' });
   }
 });
@@ -1298,17 +1384,36 @@ app.get('/api/alerts/forecast', authenticateToken, requireRole(...ROLES.DASHBOAR
     if (!digest) return res.status(503).json({ error: 'Forecast unavailable' });
     res.json(digest);
   } catch (error) {
-    console.error('Forecast query failed:', error);
+    logger.error({ err: error }, 'Forecast query failed');
     res.status(500).json({ error: 'Failed to build forecast digest' });
   }
 });
+
+// --- SERVE THE BUILT FRONTEND ---
+// Single-process production deployment (see deployment.md): the backend serves the frontend's
+// built assets directly instead of a separate static host. Only wired up if frontend/dist actually
+// exists — in local dev (frontend served separately by `vite dev` on :5173) it's absent, so this
+// silently does nothing and today's two-process dev setup is unaffected. Registered after every
+// /api and /socket.io route above, so a request for a real endpoint is never shadowed by it.
+const FRONTEND_DIST = path.join(__dirname, '..', 'frontend', 'dist');
+if (fs.existsSync(path.join(FRONTEND_DIST, 'index.html'))) {
+  app.use(express.static(FRONTEND_DIST));
+  // Client-side routing (react-router): any GET that isn't /api or /socket.io falls through to
+  // index.html so the frontend router handles the path instead of a 404.
+  app.get(/^\/(?!api\/|socket\.io\/).*/, (req, res) => {
+    res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+  });
+  logger.info(`[static] serving built frontend from ${FRONTEND_DIST}`);
+} else {
+  logger.info('[static] frontend/dist not found — not serving the frontend (normal in local dev; run `npm run build` in frontend/ for production).');
+}
 
 // --- DAILY DIGEST (scheduled) ---
 
 function startDailyDigestCron() {
   const expr = process.env.DAILY_DIGEST_CRON || '0 8 * * *';
   if (!cron.validate(expr)) {
-    console.error(`[digest] invalid DAILY_DIGEST_CRON="${expr}" — digest not scheduled.`);
+    logger.error(`[digest] invalid DAILY_DIGEST_CRON="${expr}" — digest not scheduled.`);
     return;
   }
   cron.schedule(
@@ -1318,22 +1423,22 @@ function startDailyDigestCron() {
       try {
         await lowStockAlerts.sendDigestNow();
       } catch (err) {
-        console.error('[low-stock] scheduled digest failed:', err.message);
+        logger.error({ err: err.message }, '[low-stock] scheduled digest failed');
       }
       try {
         await expiryAlerts.sendDigestNow();
       } catch (err) {
-        console.error('[expiry] scheduled digest failed:', err.message);
+        logger.error({ err: err.message }, '[expiry] scheduled digest failed');
       }
       try {
         await forecastAlerts.sendDigestNow();
       } catch (err) {
-        console.error('[forecast] scheduled digest failed:', err.message);
+        logger.error({ err: err.message }, '[forecast] scheduled digest failed');
       }
     },
     { timezone: process.env.TZ || 'Asia/Manila' },
   );
-  console.log(
+  logger.info(
     `[digest] low-stock + expiry + forecast scheduled with cron "${expr}" (tz=${process.env.TZ || 'Asia/Manila'})`,
   );
 }
@@ -1343,7 +1448,7 @@ function startDailyDigestCron() {
 function startForecastSnapshotCron() {
   const expr = process.env.FORECAST_SNAPSHOT_CRON || '5 0 * * *';
   if (!cron.validate(expr)) {
-    console.error(`[forecast] invalid FORECAST_SNAPSHOT_CRON="${expr}" — nightly snapshot not scheduled.`);
+    logger.error(`[forecast] invalid FORECAST_SNAPSHOT_CRON="${expr}" — nightly snapshot not scheduled.`);
     return;
   }
   cron.schedule(
@@ -1351,25 +1456,86 @@ function startForecastSnapshotCron() {
     async () => {
       try {
         const result = await forecastSnapshots.saveToday();
-        console.log('[forecast] nightly snapshot:', result.saved ? `saved ${result.items} products` : result.reason);
+        logger.info(`[forecast] nightly snapshot: ${result.saved ? `saved ${result.items} products` : result.reason}`);
       } catch (err) {
-        console.error('[forecast] nightly snapshot failed:', err.message);
+        logger.error({ err: err.message }, '[forecast] nightly snapshot failed');
       }
     },
     { timezone: DemandForecastModel.STORE_TIMEZONE },
   );
-  console.log(`[forecast] nightly snapshot scheduled with cron "${expr}" (tz=${DemandForecastModel.STORE_TIMEZONE})`);
+  logger.info(`[forecast] nightly snapshot scheduled with cron "${expr}" (tz=${DemandForecastModel.STORE_TIMEZONE})`);
 }
 
-server.listen(PORT, async () => {
-  console.log(`🚀 POS Server running on http://localhost:${PORT}`);
-  startForecastSnapshotCron();
-  const smtpOk = await mailer.verifyMailer();
-  if (smtpOk) {
-    startDailyDigestCron();
-  } else if (mailer.isConfigured()) {
-    console.log('[digest] SMTP credentials rejected — fix SMTP_PASS in backend/.env and restart. Alerts OFF.');
-  } else {
-    console.log('[digest] SMTP not configured — per-event alerts and daily digest disabled.');
+// Nightly pg_dump, mirrored to the external drive / cloud folder when those env vars are set,
+// with old dumps pruned past the retention window. See services/backup.js.
+function startBackupCron() {
+  const expr = process.env.BACKUP_CRON || '30 1 * * *';
+  if (!cron.validate(expr)) {
+    logger.error(`[backup] invalid BACKUP_CRON="${expr}" — nightly backup not scheduled.`);
+    return;
   }
-});
+  cron.schedule(
+    expr,
+    async () => {
+      try {
+        const result = await backup.runBackup();
+        logger.info(
+          `[backup] wrote ${result.file} (${(result.sizeBytes / 1024 / 1024).toFixed(2)} MB), ` +
+            `copied to ${result.copiedTo.length} off-site location(s), pruned ${result.pruned} old file(s).`,
+        );
+        for (const w of result.warnings) logger.warn(`[backup] ${w}`);
+      } catch (err) {
+        logger.error({ err: err.message }, '[backup] nightly backup failed');
+      }
+    },
+    { timezone: process.env.TZ || 'Asia/Manila' },
+  );
+  logger.info(`[backup] nightly database backup scheduled with cron "${expr}" (tz=${process.env.TZ || 'Asia/Manila'})`);
+}
+
+// Retries with backoff before giving up: the process manager (Phase 4: pm2/NSSM) may start
+// Postgres and this backend around the same time on boot, and Postgres can take a few seconds
+// longer to start accepting connections. Previously the Prisma/pg pool connected lazily, so a
+// genuinely unreachable database only surfaced as generic 500s on the first request instead of a
+// clear fatal error at boot.
+async function waitForDatabase() {
+  const maxAttempts = 6;
+  const delayMs = 3000;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      return;
+    } catch (err) {
+      if (attempt === maxAttempts) {
+        logger.fatal({ err }, `Could not reach the database after ${maxAttempts} attempts — check DATABASE_URL and that Postgres is running`);
+        process.exit(1);
+      }
+      logger.warn(`Database not reachable yet (attempt ${attempt}/${maxAttempts}) — retrying in ${delayMs / 1000}s...`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
+// Guarded so a test file can `require('../index.js')` to get `app` (for supertest-style route
+// testing) without also binding the real port, scheduling crons, or verifying SMTP — only running
+// this when the file is executed directly (`node index.js` / `npm start` / `npm run dev`).
+if (require.main === module) {
+  (async () => {
+    await waitForDatabase();
+    server.listen(PORT, async () => {
+      logger.info(`🚀 POS Server running on http://localhost:${PORT}`);
+      startForecastSnapshotCron();
+      startBackupCron();
+      const smtpOk = await mailer.verifyMailer();
+      if (smtpOk) {
+        startDailyDigestCron();
+      } else if (mailer.isConfigured()) {
+        logger.info('[digest] SMTP credentials rejected — fix SMTP_PASS in backend/.env and restart. Alerts OFF.');
+      } else {
+        logger.info('[digest] SMTP not configured — per-event alerts and daily digest disabled.');
+      }
+    });
+  })();
+}
+
+module.exports = { app, server, io, prisma };

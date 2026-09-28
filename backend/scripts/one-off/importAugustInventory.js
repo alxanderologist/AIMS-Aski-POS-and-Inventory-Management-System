@@ -9,14 +9,17 @@
 //   node importAugustInventory.js            dry run — parses everything, prints a report, writes nothing
 //   node importAugustInventory.js --commit   parses, then actually adjusts stock / creates products
 require('dotenv').config();
+const { assertNotProduction } = require('../lib/productionGuard');
+assertNotProduction('importAugustInventory.js');
+
 const path = require('path');
 const ExcelJS = require('exceljs');
-const { prisma } = require('./models/Product');
-const { changeStock } = require('./models/stockLedger');
-const { cleanSupplierName, supplierNameKey } = require('./services/supplierName');
+const { prisma } = require('../../models/Product');
+const { changeStock } = require('../../models/stockLedger');
+const { cleanSupplierName, supplierNameKey } = require('../../services/supplierName');
 
 const COMMIT = process.argv.includes('--commit');
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = path.join(__dirname, '../../data');
 const p = (...parts) => path.join(DATA_DIR, ...parts);
 
 const MAX_BLANK_RUN = 30;

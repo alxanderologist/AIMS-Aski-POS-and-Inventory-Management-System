@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const logger = require('./logger');
 
 let cachedTransporter = null;
 
@@ -40,17 +41,17 @@ function getTransporter() {
 async function verifyMailer() {
   const t = getTransporter();
   if (!t) {
-    console.log('[mailer] SMTP not configured — low-stock & expiry emails disabled.');
+    logger.info('[mailer] SMTP not configured — low-stock & expiry emails disabled.');
     return false;
   }
   try {
     await t.verify();
-    console.log(
+    logger.info(
       `[mailer] SMTP ready via ${process.env.SMTP_HOST}:${process.env.SMTP_PORT || 587} → ${getRecipients().join(', ')}`,
     );
     return true;
   } catch (err) {
-    console.error('[mailer] SMTP verify failed:', err.message);
+    logger.error({ err: err.message }, '[mailer] SMTP verify failed');
     return false;
   }
 }

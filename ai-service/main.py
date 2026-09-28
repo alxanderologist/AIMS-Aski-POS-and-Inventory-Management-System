@@ -28,6 +28,16 @@ def _load_env_file(path: Path) -> None:
 
 _load_env_file(Path(__file__).with_name(".env"))
 
+# Fail fast instead of starting in a silently-insecure state: in production, AI_SERVICE_KEY must be
+# set so require_key() below actually rejects unauthenticated calls (unset means open, for local dev).
+# NODE_ENV is the same variable backend/index.js checks — set it the same way here (ai-service/.env
+# or the process environment) so both services agree on "production" with one flag.
+if os.environ.get("NODE_ENV") == "production" and not os.environ.get("AI_SERVICE_KEY"):
+    raise SystemExit(
+        "FATAL: AI_SERVICE_KEY is not set. Required when NODE_ENV=production so this service "
+        "cannot be called by anything but the backend (set the same value in backend/.env)."
+    )
+
 
 def require_key(x_ai_key: Optional[str] = Header(default=None)) -> None:
     """Optional shared secret: when AI_SERVICE_KEY is set, forecast calls must send it as X-AI-Key.

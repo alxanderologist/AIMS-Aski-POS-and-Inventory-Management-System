@@ -8,12 +8,15 @@
 //   node importAugustSales.js            dry run — parses everything, prints a report, writes nothing
 //   node importAugustSales.js --commit   parses, then actually creates Transactions/TransactionItems
 require('dotenv').config();
+const { assertNotProduction } = require('../lib/productionGuard');
+assertNotProduction('importAugustSales.js');
+
 const path = require('path');
 const ExcelJS = require('exceljs');
-const { prisma } = require('./models/Product');
+const { prisma } = require('../../models/Product');
 
 const COMMIT = process.argv.includes('--commit');
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = path.join(__dirname, '../../data');
 const p = (...parts) => path.join(DATA_DIR, ...parts);
 
 const MAX_BLANK_RUN = 30;

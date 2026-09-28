@@ -19,7 +19,7 @@ npm install                # install deps
 npx prisma db push         # sync Prisma schema to Postgres (no migration files)
 npm run dev                # start with --watch on http://localhost:5000
 npm start                  # start without watch
-npm run seed               # run prisma/seeder.js (prisma db seed)
+npm run seed               # run scripts/seeder.js (prisma db seed); refuses to run when NODE_ENV=production
 ```
 `npm test` runs the forecast tests (`node --test`, no extra dependencies: engine parity with the Python golden fixture, stats, stock-out days, accuracy grading, AI client retry/breaker, forecast cache); there is no other test suite yet.
 
@@ -40,6 +40,9 @@ python -m venv venv
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
+`--reload` is dev-only (auto-restarts on file changes, adds overhead). Production runs
+`uvicorn main:app --host 127.0.0.1 --port 8000` instead (no `--reload`, bound to loopback only —
+see `deploy/INSTALL.md`).
 
 Run all three together (see `runner.txt`) in separate terminals: frontend (`npm run dev`), backend (`npm run dev`), ai-service (`uvicorn main:app --reload --port 8000`).
 

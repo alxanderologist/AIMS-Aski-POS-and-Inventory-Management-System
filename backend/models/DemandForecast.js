@@ -1,4 +1,5 @@
 const { prisma } = require('./Product');
+const logger = require('../services/logger');
 const { buildForecast } = require('../services/forecastEngine');
 const { postJson, createBreaker } = require('../services/aiClient');
 const { createCache } = require('../services/forecastCache');
@@ -131,7 +132,7 @@ const computeForecast = async (daysToForecast, today) => {
       detail = `HTTP ${error.response.status} ${JSON.stringify(error.response.data).slice(0, 300)}`;
       if (error.response.status === 401) detail += ' - check that AI_SERVICE_KEY matches in backend/.env and ai-service/.env';
     }
-    console.warn(`[forecast] AI service unavailable (${detail}). Using the built-in engine (same method, source: "fallback").`);
+    logger.warn(`[forecast] AI service unavailable (${detail}). Using the built-in engine (same method, source: "fallback").`);
     const result = buildForecast(input, { source: 'fallback' });
     result.meta.generatedAt = new Date().toISOString();
     return result;

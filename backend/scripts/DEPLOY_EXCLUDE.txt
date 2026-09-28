@@ -1,0 +1,11 @@
+# Paths to exclude from any packaging/deploy step that ships the backend (Phase 4's install
+# script should read this list, e.g. as an rsync/robocopy/zip exclude file).
+#
+# backend/data/ is source Excel spreadsheets used only by scripts/one-off/import*.js — it is
+# tracked in git (verified 2026-09-28; an earlier audit assumed it wasn't) and would otherwise be
+# dragged into every deploy by a plain "copy the repo" packaging step.
+
+backend/data/
+backend/scripts/one-off/
+backend/backups/
+backend/.env

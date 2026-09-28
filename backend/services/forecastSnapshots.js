@@ -2,6 +2,7 @@
 // models/ForecastAccuracy.js). One snapshot per store-local day per engine version; saving is
 // idempotent, so the nightly cron and the "first dashboard request of the day" hook can both run.
 const { prisma } = require('../models/Product');
+const logger = require('./logger');
 const { getForecastData, STORE_TIMEZONE, localDate } = require('../models/DemandForecast');
 
 const MIN_FORECAST_DAYS = 30; // revenue30 needs a 30-day path
@@ -62,9 +63,9 @@ const saveFromRequest = (data) => {
   saveSnapshot(data)
     .then((result) => {
       if (result.saved || result.reason === 'already-saved') savedToday.add(key);
-      if (result.saved) console.log(`[forecast] saved snapshot for ${result.asOf} (${result.items} products)`);
+      if (result.saved) logger.info(`[forecast] saved snapshot for ${result.asOf} (${result.items} products)`);
     })
-    .catch((error) => console.error('[forecast] could not save snapshot:', error.message));
+    .catch((error) => logger.error({ err: error }, '[forecast] could not save snapshot'));
 };
 
 // Nightly job: forecast for the day that just began, from the complete previous day.

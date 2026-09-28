@@ -7,7 +7,10 @@
 // Dry run by default; --commit actually writes the batches.
 
 require('dotenv').config();
-const { prisma } = require('./models/Product');
+const { assertNotProduction } = require('../lib/productionGuard');
+assertNotProduction('backfillStockBatches.js');
+
+const { prisma } = require('../../models/Product');
 
 async function main() {
   const commit = process.argv.includes('--commit');

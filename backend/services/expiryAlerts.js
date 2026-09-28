@@ -2,6 +2,7 @@
 // EXPIRY_WARN_DAYS window (default 30) or is already past.
 
 const { prisma } = require('../models/Product');
+const logger = require('./logger');
 const mailer = require('./mailer');
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -68,24 +69,24 @@ async function notifyExpiryCrossing(product) {
     const enriched = { ...product, daysUntilExpiry: daysUntil(product.expiryDate) };
     const res = await mailer.sendExpiryAlert(enriched, getWindowDays());
     if (res && res.messageId) {
-      console.log(
+      logger.info(
         `[expiry] sent crossing alert for "${product.name}" (${enriched.daysUntilExpiry} days) — ${res.messageId}`,
       );
     }
   } catch (err) {
-    console.error('[expiry] alert send failed:', err.message);
+    logger.error({ err: err.message }, '[expiry] alert send failed');
   }
 }
 
 async function sendDigestNow() {
   const products = await findExpiringSoon();
   if (products.length === 0) {
-    console.log('[expiry] digest: no products within window, nothing to send.');
+    logger.info('[expiry] digest: no products within window, nothing to send.');
     return { count: 0 };
   }
   const res = await mailer.sendExpiryDigest(products, getWindowDays());
   if (res && res.messageId) {
-    console.log(`[expiry] sent digest for ${products.length} product(s) — ${res.messageId}`);
+    logger.info(`[expiry] sent digest for ${products.length} product(s) — ${res.messageId}`);
   }
   return { count: products.length, ...res };
 }

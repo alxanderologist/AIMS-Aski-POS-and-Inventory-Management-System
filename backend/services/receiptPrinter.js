@@ -4,6 +4,7 @@
 // Configure via RECEIPT_PRINTER_INTERFACE in backend/.env — see .env.example and print.md.
 
 const { ThermalPrinter, PrinterTypes } = require('node-thermal-printer');
+const logger = require('./logger');
 const { STORE_INFO } = require('../config/storeInfo');
 const winRawPrintDriver = require('./winRawPrintDriver');
 const { WIDTH, toCols, money, fmtDateTime, renderToPrinter, buildSaleReceipt, buildVoidReceipt } = require('./receiptLayout');
@@ -43,7 +44,7 @@ function buildPrinter() {
 // it printed, so callers can report it or ignore it.
 async function printLines(lines, label) {
   if (!isConfigured()) {
-    console.log('[receipt-printer] RECEIPT_PRINTER_INTERFACE not set in backend/.env — skipping silent print.');
+    logger.info('[receipt-printer] RECEIPT_PRINTER_INTERFACE not set in backend/.env — skipping silent print.');
     return { printed: false, reason: 'not_configured' };
   }
 
@@ -51,7 +52,7 @@ async function printLines(lines, label) {
 
   const connected = await printer.isPrinterConnected().catch(() => false);
   if (!connected) {
-    console.error(`[receipt-printer] Printer not reachable at "${INTERFACE}" — skipping print.`);
+    logger.error(`[receipt-printer] Printer not reachable at "${INTERFACE}" — skipping print.`);
     return { printed: false, reason: 'unreachable' };
   }
 
@@ -60,10 +61,10 @@ async function printLines(lines, label) {
 
   try {
     await printer.execute();
-    console.log(`[receipt-printer] Printed ${label}.`);
+    logger.info(`[receipt-printer] Printed ${label}.`);
     return { printed: true };
   } catch (err) {
-    console.error(`[receipt-printer] Print of ${label} failed:`, err.message);
+    logger.error({ err: err.message }, `[receipt-printer] Print of ${label} failed`);
     return { printed: false, reason: 'error', error: err.message };
   }
 }
@@ -96,7 +97,7 @@ const PAYMENT_LABELS = { CASH: 'CASH', CARD: 'CARD', E_wallet: 'E-WALLET' };
 // With `reprint`, the copy is marked "*** REPRINT ***" and stamped with the reprint time.
 async function printZReading(report = {}, { reprint = false } = {}) {
   if (!isConfigured()) {
-    console.log('[receipt-printer] RECEIPT_PRINTER_INTERFACE not set in backend/.env — skipping silent print.');
+    logger.info('[receipt-printer] RECEIPT_PRINTER_INTERFACE not set in backend/.env — skipping silent print.');
     return { printed: false, reason: 'not_configured' };
   }
 
@@ -104,7 +105,7 @@ async function printZReading(report = {}, { reprint = false } = {}) {
 
   const connected = await printer.isPrinterConnected().catch(() => false);
   if (!connected) {
-    console.error(`[receipt-printer] Printer not reachable at "${INTERFACE}" — skipping print.`);
+    logger.error(`[receipt-printer] Printer not reachable at "${INTERFACE}" — skipping print.`);
     return { printed: false, reason: 'unreachable' };
   }
 
@@ -196,10 +197,10 @@ async function printZReading(report = {}, { reprint = false } = {}) {
 
   try {
     await printer.execute();
-    console.log(`[receipt-printer] Printed Z-Reading ${report.reportNo ?? 'N/A'}${reprint ? ' (reprint)' : ''}.`);
+    logger.info(`[receipt-printer] Printed Z-Reading ${report.reportNo ?? 'N/A'}${reprint ? ' (reprint)' : ''}.`);
     return { printed: true };
   } catch (err) {
-    console.error('[receipt-printer] Z-Reading print failed:', err.message);
+    logger.error({ err: err.message }, '[receipt-printer] Z-Reading print failed');
     return { printed: false, reason: 'error', error: err.message };
   }
 }
@@ -230,7 +231,7 @@ const DENOMINATION_ROWS = [
 // Reconciliation row (models/Reconciliation.js) with its cashier relation included.
 async function printXReading(record = {}) {
   if (!isConfigured()) {
-    console.log('[receipt-printer] RECEIPT_PRINTER_INTERFACE not set in backend/.env — skipping silent print.');
+    logger.info('[receipt-printer] RECEIPT_PRINTER_INTERFACE not set in backend/.env — skipping silent print.');
     return { printed: false, reason: 'not_configured' };
   }
 
@@ -238,7 +239,7 @@ async function printXReading(record = {}) {
 
   const connected = await printer.isPrinterConnected().catch(() => false);
   if (!connected) {
-    console.error(`[receipt-printer] Printer not reachable at "${INTERFACE}" — skipping print.`);
+    logger.error(`[receipt-printer] Printer not reachable at "${INTERFACE}" — skipping print.`);
     return { printed: false, reason: 'unreachable' };
   }
 
@@ -341,10 +342,10 @@ async function printXReading(record = {}) {
 
   try {
     await printer.execute();
-    console.log(`[receipt-printer] Printed X-Reading ${record.reportNo ?? 'N/A'}.`);
+    logger.info(`[receipt-printer] Printed X-Reading ${record.reportNo ?? 'N/A'}.`);
     return { printed: true };
   } catch (err) {
-    console.error('[receipt-printer] X-Reading print failed:', err.message);
+    logger.error({ err: err.message }, '[receipt-printer] X-Reading print failed');
     return { printed: false, reason: 'error', error: err.message };
   }
 }

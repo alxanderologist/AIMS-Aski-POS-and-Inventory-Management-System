@@ -2,13 +2,14 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { prisma } = require('./Product');
+const logger = require('../services/logger');
 const loginThrottle = require('../services/loginThrottle');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = '12h';
 
 if (!JWT_SECRET) {
-  console.warn('[auth] JWT_SECRET is not set in the environment — login will fail until it is configured in backend/.env.');
+  logger.warn('[auth] JWT_SECRET is not set in the environment — login will fail until it is configured in backend/.env.');
 }
 
 // Errors the routes should answer with a specific HTTP status (401 bad credentials, 429 locked).
@@ -112,7 +113,7 @@ async function authenticateToken(req, res, next) {
     req.user = { id: user.id, username: user.username, role: user.role };
     next();
   } catch (error) {
-    console.error('[auth] user lookup failed:', error);
+    logger.error({ err: error }, '[auth] user lookup failed');
     return res.status(500).json({ error: 'Failed to verify session.' });
   }
 }

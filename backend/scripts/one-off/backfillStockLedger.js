@@ -1,7 +1,10 @@
 // One-off, idempotent: gives every product that has stock but no ledger history an OPENING movement
 // dated at the product's creation, so the ledger balances from day one. Safe to re-run.
 require('dotenv').config();
-const { prisma } = require('./models/Product');
+const { assertNotProduction } = require('../lib/productionGuard');
+assertNotProduction('backfillStockLedger.js');
+
+const { prisma } = require('../../models/Product');
 
 async function backfill() {
   const products = await prisma.product.findMany({

@@ -16,7 +16,10 @@
 //   node simulateSeptemberGap.js --commit   actually creates the synthetic Transactions/TransactionItems
 //   node simulateSeptemberGap.js --revert   deletes every SIM-* transaction (and its items, via cascade)
 require('dotenv').config();
-const { prisma } = require('./models/Product');
+const { assertNotProduction } = require('../lib/productionGuard');
+assertNotProduction('simulateSeptemberGap.js');
+
+const { prisma } = require('../../models/Product');
 
 const COMMIT = process.argv.includes('--commit');
 const REVERT = process.argv.includes('--revert');

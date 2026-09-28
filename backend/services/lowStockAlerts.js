@@ -3,6 +3,7 @@
 // a sale that pushes stock from above minStock to at or below it.
 
 const { prisma } = require('../models/Product');
+const logger = require('./logger');
 const mailer = require('./mailer');
 
 /**
@@ -31,12 +32,12 @@ async function notifyCrossings(crossings) {
   try {
     const res = await mailer.sendLowStockAlert(crossings);
     if (res && res.messageId) {
-      console.log(
+      logger.info(
         `[low-stock] sent crossing alert for ${crossings.length} product(s) — ${res.messageId}`,
       );
     }
   } catch (err) {
-    console.error('[low-stock] alert send failed:', err.message);
+    logger.error({ err: err.message }, '[low-stock] alert send failed');
   }
 }
 
@@ -60,12 +61,12 @@ async function findCurrentlyLow() {
 async function sendDigestNow() {
   const products = await findCurrentlyLow();
   if (products.length === 0) {
-    console.log('[low-stock] digest: no low-stock products, nothing to send.');
+    logger.info('[low-stock] digest: no low-stock products, nothing to send.');
     return { count: 0 };
   }
   const res = await mailer.sendLowStockDigest(products);
   if (res && res.messageId) {
-    console.log(`[low-stock] sent digest for ${products.length} product(s) — ${res.messageId}`);
+    logger.info(`[low-stock] sent digest for ${products.length} product(s) — ${res.messageId}`);
   }
   return { count: products.length, ...res };
 }

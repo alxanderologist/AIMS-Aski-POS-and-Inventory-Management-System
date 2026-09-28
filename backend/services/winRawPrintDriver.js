@@ -1,5 +1,5 @@
 // Sends raw ESC/POS bytes to a printer's shared Windows print queue via a binary file copy
-// (`copy /b file \\localhost\<share>`) — the standard Windows trick for raw printer output that
+// (`copy /b file \\host\<share>`) — the standard Windows trick for raw printer output that
 // skips GDI/text formatting entirely, so the thermal printer's own command bytes reach it intact.
 //
 // This exists in place of the `printer` npm package that node-thermal-printer's `printer:<name>`
@@ -9,9 +9,12 @@
 // module implements the same minimal shape (getPrinters/getPrinter/printDirect) node-thermal-
 // printer expects from a driver, with zero native dependencies. See print.md for setup.
 //
-// Requires: the printer installed in Windows (via its own driver) with "Share this printer"
-// turned on, using a share name with no spaces — that share name is what goes after `printer:` in
-// RECEIPT_PRINTER_INTERFACE (e.g. printer:EPSON_TMT82X).
+// Requires: the printer installed in Windows (via its own driver) with "Share this printer" turned
+// on, using a share name with no spaces. RECEIPT_PRINTER_INTERFACE takes two forms after `printer:`
+// (see node-thermal-printer's own `printer:<name>` parsing, which passes everything after the colon
+// straight through — a backslash is not a `/`, so a UNC path survives that parsing intact):
+//   printer:EPSON_TMT82X                same-machine share (used as \\localhost\<share>)
+//   printer:\\CASHIER-PC\EPSON_TMT82X   a share on another PC on the LAN, reached by hostname
 
 const fs = require('fs');
 const os = require('os');
@@ -42,7 +45,9 @@ function printDirect({ data, printer, docname, success, error }) {
       return;
     }
 
-    const target = `\\\\localhost\\${printer}`;
+    // `printer` is already a full `\\HOST\share` UNC path when RECEIPT_PRINTER_INTERFACE names a
+    // remote share; otherwise it's a bare share name meaning "this machine".
+    const target = printer.startsWith('\\\\') ? printer : `\\\\localhost\\${printer}`;
     // Bounded, so a hung print queue can't stall a request that waits on the result.
     exec(`copy /b "${tempFile}" "${target}"`, { timeout: 15000 }, (execErr, stdout, stderr) => {
       fs.unlink(tempFile, () => {});

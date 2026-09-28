@@ -1,4 +1,5 @@
 const { postJson } = require('../services/aiClient');
+const logger = require('../services/logger');
 const { prisma } = require('./Product');
 const { loadDailySales } = require('./salesHistory');
 const { loadForecastInput, STORE_TIMEZONE, localDate, PYTHON_AI_URL } = require('./DemandForecast');
@@ -77,7 +78,7 @@ const getBacktest = async (today) => {
     return value;
   } catch (error) {
     const detail = error.response ? `HTTP ${error.response.status}` : error.message;
-    console.warn(`[forecast] backtest unavailable (${detail}).`);
+    logger.warn(`[forecast] backtest unavailable (${detail}).`);
     return { available: false, reason: 'The AI service is not reachable, so the backtest cannot run right now.' };
   }
 };

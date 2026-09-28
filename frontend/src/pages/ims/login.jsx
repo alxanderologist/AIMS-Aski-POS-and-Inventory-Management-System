@@ -112,10 +112,6 @@ export default function Login() {
                 {busy ? 'Signing in…' : 'Log in'}
               </button>
             </div>
-
-            <p className="text-center text-[10px] sm:text-xs text-slate-600 font-medium pt-0.5 sm:pt-1">
-              Dev mode — try <span className="font-mono">admin / admin123</span>, <span className="font-mono">cashier / cashier123</span>. See <span className="font-mono">src/auth/devUsers.js</span>.
-            </p>
           </form>
         </div>
       </div>

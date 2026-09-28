@@ -8,7 +8,10 @@
 // no real transactions have been imported), their StockMovements, and all cached ForecastSnapshots
 // (derived from the demo sales history; they regenerate automatically).
 require('dotenv').config();
-const { prisma } = require('./models/Product');
+const { assertNotProduction } = require('../lib/productionGuard');
+assertNotProduction('cleanupDemoData.js');
+
+const { prisma } = require('../../models/Product');
 
 const DEMO_SUPPLIER_NAMES = ['Alpha Distributing Co.', 'Global Goods Inc.', 'Prime Wholesale Ltd.', 'Jollibee Food Corporation'];
 
